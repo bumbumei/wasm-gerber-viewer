@@ -31,6 +31,7 @@ WASM/WebGL2-based Gerber file viewer for PCB visualization.
 - WebGL2 hardware-accelerated rendering via WASM
 - RS-274X Gerber rendering support
 - NC drill overlay rendering support
+- ODB++ job import (`.tgz`/`.tar.gz`/`.tar`, `.zip` job trees, dropped folders; `.Z`/`.gz` compressed files inside the job); board layers, drills, and the step profile are converted to Gerber/Excellon in the browser, with user-defined symbols expanded
 - Touch support for mobile devices
 - Multi-layer rendering with per-layer color and visibility control
 - Composite Layers with Union, Intersection, Difference, and custom coverage

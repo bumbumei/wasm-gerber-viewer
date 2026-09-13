@@ -31,6 +31,7 @@
 - 基于 WASM 与 WebGL2 的硬件加速渲染
 - 支持 RS-274X Gerber 渲染
 - 支持 NC drill 叠加渲染
+- 支持导入 ODB++ 作业（`.tgz`/`.tar.gz`/`.tar`、包含 ODB++ 目录树的 `.zip`、拖放文件夹；作业内的 `.Z`/`.gz` 压缩文件）- 在浏览器中将板层、钻孔和 step profile 转换为 Gerber/Excellon，并展开用户自定义符号
 - 支持移动设备触控操作
 - 支持按层控制颜色、透明度和可见性
 - Composite Layer 支持 Union、Intersection、Difference 和自定义 coverage

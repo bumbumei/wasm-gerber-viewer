@@ -23,11 +23,16 @@ import { NotificationCenter } from "../ui/notifications.js";
 import {
   collectLayerSources,
   fetchRemoteFile,
+  getInitialOdbStepName,
   getInitialSourceRepeat,
   getInitialSourceRepeatOffset,
   getInitialSourceUrl,
   repeatLayerSources,
 } from "../loading/source-loader.js";
+import {
+  collectDroppedEntries,
+  getDroppedEntries,
+} from "../loading/dropped-entries.js";
 import { ScreenshotExporter } from "../rendering/screenshot-exporter.js";
 import {
   calculateFitView as calculateViewportFit,
@@ -4062,6 +4067,14 @@ export class GerberViewer {
           indeterminate: true,
         });
       },
+      onArchiveStage: (name, stage) => {
+        this.updateLoadingModal({
+          stage,
+          fileName: name,
+          indeterminate: true,
+        });
+      },
+      odbStepName: getInitialOdbStepName(),
       onFileStart: (name, current, total) => {
         this.updateLoadingModal({
           stage: "Preparing",
@@ -10020,13 +10033,28 @@ export class GerberViewer {
     }
   }
 
-  handleDrop(e) {
+  async handleDrop(e) {
     if (this.draggedLayerId) return;
 
     e.preventDefault();
     e.stopPropagation();
     this.dropZone.classList.remove("drag-active");
     if (this.isRendererBusy()) return;
+
+    // Folder drops (for example an unpacked ODB++ job) arrive as directory
+    // entries; they must be resolved before the event finishes.
+    const entries = getDroppedEntries(e.dataTransfer);
+    if (entries.some((entry) => entry?.isDirectory)) {
+      try {
+        const items = await collectDroppedEntries(entries);
+        if (items.length > 0) {
+          this.startFileUpload(items);
+        }
+      } catch (error) {
+        this.handleLayerLoadError("Dropped folder", error);
+      }
+      return;
+    }
 
     const files = e.dataTransfer?.files;
     if (files?.length > 0) {
