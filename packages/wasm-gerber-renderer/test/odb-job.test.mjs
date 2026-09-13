@@ -86,28 +86,42 @@ test("a .tgz ODB++ job becomes ordered layer sources with Gerber-style names", a
 
   const top = sources.find((source) => source.name === "top.gtl");
   assert.equal(top.sizeBytes, toBytes(topFeatures).byteLength, "features.Z is decompressed for sizing");
-  const gerber = await top.readText();
-  assert.match(gerber, /^G04 ODB\+\+ demo_board\/pcb\/TOP\*\n%FSLAX46Y46\*%\n%MOMM\*%/);
-  assert.match(gerber, /%LR330\*%/, "8 30 pad rotates -30 degrees");
-  assert.match(gerber, /%LMY\*%\n%LR30\*%/, "9 30 pad mirrors and keeps +30");
-  assert.match(gerber, /G36\*/);
-  assert.equal(await top.readText(), gerber, "conversion is memoised");
+  // The layer text is an envelope of the original ODB++ files: the features
+  // file plus every user-defined symbol it references, nested ones included.
+  const envelope = await top.readText();
+  assert.match(envelope, /^%ODB\+\+LAYER%\nkind=signal\nname=TOP\n%ODB\+\+FILE features%\n/);
+  assert.ok(envelope.includes(topFeatures), "features file travels verbatim");
+  assert.match(envelope, /%ODB\+\+FILE symbols\/fiducial%\n/);
+  assert.match(envelope, /%ODB\+\+END%\n$/);
+  assert.ok(!envelope.includes("symbols/logo"), "only symbols this layer references");
+  assert.equal(await top.readText(), envelope, "the envelope is memoised");
+
+  const silk = sources.find((source) => source.name === "sst.gto");
+  const silkEnvelope = await silk.readText();
+  assert.match(silkEnvelope, /%ODB\+\+FILE symbols\/logo%\n/);
+  assert.match(silkEnvelope, /%ODB\+\+FILE symbols\/arrow%\n/, "nested symbol collected");
+
+  const profile = sources.find((source) => source.name === "profile.gko");
+  assert.match(await profile.readText(), /^%ODB\+\+LAYER%\nkind=profile\n/);
 
   const smb = sources.find((source) => source.name === "smb.gbs");
-  assert.match(await smb.readText(), /%ADD10C,0\.8\*%/, "features.gz layer converted");
+  assert.match(await smb.readText(), /%ODB\+\+FILE features%\nUNITS=MM/, "features.gz layer decompressed");
 
   const drill = sources.find((source) => source.name === "drill-pth.drl");
-  const excellon = await drill.readText();
-  assert.match(excellon, /^M48\n/);
-  assert.match(excellon, /T01C0\.3\n/);
-  assert.match(excellon, /G85/);
+  const drillEnvelope = await drill.readText();
+  assert.match(drillEnvelope, /^%ODB\+\+LAYER%\nkind=drill\nname=DRILL\nplating=plated\n/);
+  assert.match(drillEnvelope, /%ODB\+\+FILE tools%\n/);
+  const npth = sources.find((source) => source.name === "drill-npth.drl");
+  assert.match(await npth.readText(), /plating=non_plated\n/);
+  const rout = sources.find((source) => source.name === "rout-npth.drl");
+  assert.match(await rout.readText(), /^%ODB\+\+LAYER%\nkind=rout\n/);
+  assert.ok(!(await rout.readText()).includes("plating="), "single plating class needs no filter");
 
   assert.ok(
     diagnostics.warnings.some((line) => /Skipped 2 non-board layers: COMPONENT x1, MISC\/DOCUMENT x1/.test(line)),
     diagnostics.warnings.join("\n"),
   );
-  assert.ok(diagnostics.warnings.some((line) => /top\.gtl: Skipped or approximated: 1 text record/.test(line)));
-  assert.ok(diagnostics.infos.some((line) => /10 ODB\+\+ layers converted from step pcb/.test(line)));
+  assert.ok(diagnostics.infos.some((line) => /10 ODB\+\+ layers imported from step pcb/.test(line)));
 });
 
 test("the same job inside a ZIP and as a dropped folder yields the same sources", async () => {

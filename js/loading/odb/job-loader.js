@@ -1,13 +1,17 @@
 import { decodeText } from "./archive/job-tree.js";
-import { drillLayerToExcellon } from "./excellon-emitter.js";
-import { NO_GEOMETRY_MESSAGE, featuresToGerber } from "./gerber-emitter.js";
-import { parseFeatures } from "./features.js";
 import { PROFILE_FILE_NAME, assignLayerFileNames } from "./layer-naming.js";
 import { DRILL_LAYER_TYPES, isImportableBoardLayer, parseMatrix } from "./matrix.js";
 import { parseStepHeader } from "./step-header.js";
 import { parseStructuredText, unitsFromValue } from "./structured-text.js";
-import { parseTools } from "./tools.js";
-import { UserSymbolLibrary } from "./user-symbols.js";
+import { isNonPlatedTool, parseTools } from "./tools.js";
+
+/**
+ * Layer text handed to WASM: the layer's original ODB++ files wrapped in a
+ * small header. The Rust `odb` module parses it straight into render
+ * geometry; no Gerber or Excellon text is generated. ODB++ text files never
+ * start a line with `%`, so the markers cannot collide with file content.
+ */
+export const ODB_ENVELOPE_MAGIC = "%ODB++LAYER%";
 
 /**
  * Read the job-level files of an ODB++ tree.
@@ -58,9 +62,9 @@ export async function selectDefaultStep(job, preferredName = null) {
 }
 
 /**
- * Build viewer layer sources for one step. Features are read up front (so the
- * archive byte budget applies) and converted to Gerber/Excellon lazily inside
- * `readText`, exactly once per source.
+ * Build viewer layer sources for one step. Layer files are read up front (so
+ * the archive byte budget applies); the envelope handed to WASM is assembled
+ * lazily inside `readText`, exactly once per source.
  */
 export async function createOdbLayerSources(
   job,
@@ -68,18 +72,14 @@ export async function createOdbLayerSources(
 ) {
   const sources = [];
   const stepPrefix = `steps/${stepName}`;
-  const header = { job: job.name, step: stepName };
-  const symbolLibrary = new UserSymbolLibrary(job.tree);
+  const symbolLibrary = new SymbolFileLibrary(job.tree);
 
   const profilePath = `${stepPrefix}/profile`;
   if (job.tree.has(profilePath)) {
     onStage(`Reading ${PROFILE_FILE_NAME}`);
     const bytes = await job.tree.readBytes(profilePath);
     sources.push(
-      createGerberSource(PROFILE_FILE_NAME, bytes, { ...header, layer: "profile" }, onWarning, {
-        surfaceMode: "outline",
-        symbolLibrary,
-      }),
+      createGerberSource(PROFILE_FILE_NAME, bytes, { kind: "profile", name: "profile", symbolLibrary }),
     );
   } else {
     onWarning(job.name, `Step ${stepName} has no profile; board outline unavailable`);
@@ -108,7 +108,6 @@ export async function createOdbLayerSources(
       onWarning(naming.fileName, "Layer has no features; skipped");
       continue;
     }
-    const layerHeader = { ...header, layer: layer.name };
 
     if (layer.polarity === "NEGATIVE") {
       onWarning(naming.fileName, "Negative-polarity layer rendered as positive");
@@ -118,16 +117,15 @@ export async function createOdbLayerSources(
       const toolsPath = `${layerDir}/tools`;
       const toolsText = job.tree.has(toolsPath) ? await job.tree.readText(toolsPath) : "";
       sources.push(
-        ...(await createDrillSources(naming.fileName, bytes, toolsText, {
-          header: layerHeader,
+        ...createDrillSources(naming.fileName, bytes, toolsText, {
           kind: layer.type === "ROUT" ? "rout" : "drill",
+          name: layer.name,
           defaultUnits: job.units,
-          onWarning,
-        })),
+        }),
       );
     } else {
       sources.push(
-        createGerberSource(naming.fileName, bytes, layerHeader, onWarning, { symbolLibrary }),
+        createGerberSource(naming.fileName, bytes, { kind: "signal", name: layer.name, symbolLibrary }),
       );
     }
   }
@@ -148,13 +146,94 @@ export async function createOdbLayerSources(
 
 const FEATURE_RECORD_PATTERN = /^[PLAST] |^B /m;
 
-/** Cheap check for at least one feature record before converting a layer. */
+/** Cheap check for at least one feature record before handing a layer over. */
 export function hasFeatureRecords(bytes) {
   return FEATURE_RECORD_PATTERN.test(decodeText(bytes));
 }
 
-function createGerberSource(fileName, bytes, header, onWarning, options = {}) {
-  const { symbolLibrary = null, ...emitterOptions } = options;
+/**
+ * Assemble the text handed to WASM for one layer.
+ * `files` is an ordered list of `[path, text]` pairs.
+ */
+export function buildOdbEnvelope({ kind, name, plating = null, files }) {
+  const lines = [ODB_ENVELOPE_MAGIC, `kind=${kind}`, `name=${sanitizeHeaderValue(name)}`];
+  if (plating) lines.push(`plating=${plating}`);
+  let text = `${lines.join("\n")}\n`;
+  for (const [path, content] of files) {
+    text += `%ODB++FILE ${path}%\n${content}\n`;
+  }
+  return `${text}%ODB++END%\n`;
+}
+
+function sanitizeHeaderValue(value) {
+  return String(value ?? "").replace(/[\r\n%]/g, "_");
+}
+
+/**
+ * Standard symbol families are resolved by name inside WASM; anything else
+ * that has a `symbols/<name>/features` file is a user-defined symbol whose
+ * definition travels with the layer.
+ */
+const STANDARD_SYMBOL_PATTERN =
+  /^(donut_sr|donut_rc|donut_r|donut_s|donut_o|oval_h|s_ths|hex_l|hex_s|moire|rect|oval|hole|ths|thr|tri|oct|bfr|bfs|el|di|r|s)[0-9.]/i;
+
+export function isStandardSymbolName(name) {
+  return STANDARD_SYMBOL_PATTERN.test(String(name ?? "").trim());
+}
+
+/** Symbol names referenced by a features file's `$<n> <name>` table. */
+export function referencedSymbolNames(featuresText) {
+  const names = [];
+  const pattern = /^\$\d+\s+(\S+)/gm;
+  let match;
+  while ((match = pattern.exec(featuresText)) !== null) {
+    names.push(match[1]);
+  }
+  return names;
+}
+
+/**
+ * Reads `symbols/<name>/features` files once per job and collects, for a
+ * layer, every user symbol it references directly or through nested symbols.
+ */
+export class SymbolFileLibrary {
+  constructor(tree) {
+    this.tree = tree;
+    this.cache = new Map();
+  }
+
+  load(name) {
+    const key = String(name).toLowerCase();
+    if (!this.cache.has(key)) {
+      const path = `symbols/${name}/features`;
+      this.cache.set(
+        key,
+        this.tree.has(path) ? this.tree.readText(path) : Promise.resolve(null),
+      );
+    }
+    return this.cache.get(key);
+  }
+
+  /** `[path, text]` pairs for the envelope, keyed by lower-cased name. */
+  async collect(featuresText) {
+    const files = new Map();
+    const queue = [featuresText];
+    while (queue.length > 0) {
+      const text = queue.pop();
+      for (const name of referencedSymbolNames(text)) {
+        const key = name.toLowerCase();
+        if (files.has(key) || isStandardSymbolName(name)) continue;
+        const symbolText = await this.load(name);
+        if (symbolText == null) continue;
+        files.set(key, [`symbols/${name}`, symbolText]);
+        queue.push(symbolText);
+      }
+    }
+    return Array.from(files.values());
+  }
+}
+
+function createGerberSource(fileName, bytes, { kind, name, symbolLibrary }) {
   let promise = null;
   return {
     name: fileName,
@@ -163,15 +242,14 @@ function createGerberSource(fileName, bytes, header, onWarning, options = {}) {
     readText: (onProgress = () => {}) => {
       if (!promise) {
         promise = (async () => {
-          const features = parseFeatures(decodeText(bytes));
-          const userSymbols = symbolLibrary ? await symbolLibrary.collect(features) : null;
-          const result = featuresToGerber(features, { header, userSymbols, ...emitterOptions });
+          const featuresText = decodeText(bytes);
           bytes = null;
-          if (!result) {
-            throw new Error(NO_GEOMETRY_MESSAGE);
-          }
-          reportGerberStats(fileName, result.stats, onWarning);
-          return result.text;
+          const symbolFiles = symbolLibrary ? await symbolLibrary.collect(featuresText) : [];
+          return buildOdbEnvelope({
+            kind,
+            name,
+            files: [["features", featuresText], ...symbolFiles],
+          });
         })();
       }
       promise.then(
@@ -183,66 +261,63 @@ function createGerberSource(fileName, bytes, header, onWarning, options = {}) {
   };
 }
 
-async function createDrillSources(fileName, bytes, toolsText, { header, kind, defaultUnits, onWarning }) {
-  // Drill layers are converted eagerly: the plating split decides how many
-  // sources exist, which the caller needs before parsing starts.
-  const features = parseFeatures(decodeText(bytes));
-  const toolsInfo = toolsText ? parseTools(toolsText, { defaultUnits }) : null;
-  const { outputs, stats } = drillLayerToExcellon(features, toolsInfo, { header, kind });
-  reportDrillStats(fileName, stats, onWarning);
-  if (outputs.length === 0) {
-    onWarning(fileName, "Drill layer has no holes; skipped");
-    return [];
-  }
+/**
+ * One drill source per plating class present (`-pth`, `-npth`), so
+ * `getDrillType` colours them; a single class keeps the plain name unless it
+ * is non-plated.
+ */
+function createDrillSources(fileName, bytes, toolsText, { kind, name, defaultUnits }) {
+  const featuresText = decodeText(bytes);
+  const toolsInfo = toolsText ? parseTools(toolsText, { defaultUnits }) : { tools: [] };
+  const platings = drillPlatingsInUse(featuresText, toolsInfo.tools);
   const stem = fileName.replace(/\.drl$/i, "");
-  return outputs.map((output) => ({
-    name: `${stem}${output.suffix}.drl`,
-    kind: "drill",
-    sizeBytes: output.text.length,
-    readText: async (onProgress = () => {}) => {
-      onProgress(1);
-      return output.text;
-    },
-  }));
+  const outputs =
+    platings.size > 1
+      ? [
+          ["plated", "-pth"],
+          ["non_plated", "-npth"],
+        ]
+      : [[null, platings.has("non_plated") ? "-npth" : ""]];
+
+  return outputs.map(([plating, suffix]) => {
+    const files = [["features", featuresText]];
+    if (toolsText) files.push(["tools", toolsText]);
+    const text = buildOdbEnvelope({ kind, name, plating, files });
+    return {
+      name: `${stem}${suffix}.drl`,
+      kind: "drill",
+      sizeBytes: text.length,
+      readText: async (onProgress = () => {}) => {
+        onProgress(1);
+        return text;
+      },
+    };
+  });
 }
 
-function reportGerberStats(fileName, stats, onWarning) {
-  const notes = [];
-  if (stats.skippedText) notes.push(`${stats.skippedText} text record${plural(stats.skippedText)}`);
-  if (stats.skippedBarcodes) notes.push(`${stats.skippedBarcodes} barcode${plural(stats.skippedBarcodes)}`);
-  if (stats.userSymbolPads) {
-    const reason = stats.expansionTruncated ? "expansion limit reached" : "symbol not found in job";
-    notes.push(
-      `${stats.userSymbolPads} feature${plural(stats.userSymbolPads)} using user-defined symbols (${listNames(stats.userSymbols)}; ${reason})`,
-    );
+/**
+ * Plating classes used by the pad, line and arc records of a drill layer.
+ * A record's `dcode` names its tool; tools not in the `tools` file count as
+ * plated, matching the WASM side.
+ */
+export function drillPlatingsInUse(featuresText, tools) {
+  const nonPlated = new Set(tools.filter(isNonPlatedTool).map((tool) => tool.num));
+  const platings = new Set();
+  const pattern = /^([PLA]) (.*)$/gm;
+  let match;
+  while ((match = pattern.exec(featuresText)) !== null) {
+    const tokens = match[2].split(";")[0].trim().split(/\s+/);
+    let dcodeIndex;
+    if (match[1] === "P") {
+      dcodeIndex = tokens[2] === "-1" ? 6 : 4;
+    } else if (match[1] === "L") {
+      dcodeIndex = 6;
+    } else {
+      dcodeIndex = 8;
+    }
+    const dcode = Number.parseInt(tokens[dcodeIndex] ?? "", 10);
+    platings.add(nonPlated.has(dcode) ? "non_plated" : "plated");
+    if (platings.size === 2) break;
   }
-  if (stats.resizedUserSymbols.size) {
-    notes.push(`resize ignored on user-defined symbols (${listNames(stats.resizedUserSymbols)})`);
-  }
-  if (stats.unknownSymbols.size) {
-    notes.push(`unknown symbols approximated as circles (${listNames(stats.unknownSymbols)})`);
-  }
-  if (stats.nonRoundLines) {
-    notes.push(`${stats.nonRoundLines} line${plural(stats.nonRoundLines)} with non-round symbols drawn round`);
-  }
-  if (notes.length) onWarning(fileName, `Skipped or approximated: ${notes.join("; ")}`);
-}
-
-function reportDrillStats(fileName, stats, onWarning) {
-  const notes = [];
-  if (stats.skippedSurfaces) notes.push(`${stats.skippedSurfaces} surface${plural(stats.skippedSurfaces)}`);
-  if (stats.skippedText) notes.push(`${stats.skippedText} text record${plural(stats.skippedText)}`);
-  if (stats.userSymbols.size) notes.push(`user-defined symbols (${listNames(stats.userSymbols)})`);
-  if (stats.unknownSymbols.size) notes.push(`unknown symbols approximated (${listNames(stats.unknownSymbols)})`);
-  if (notes.length) onWarning(fileName, `Skipped or approximated: ${notes.join("; ")}`);
-}
-
-function listNames(set, limit = 5) {
-  const names = Array.from(set);
-  const shown = names.slice(0, limit).join(", ");
-  return names.length > limit ? `${shown}, +${names.length - limit} more` : shown;
-}
-
-function plural(count) {
-  return count === 1 ? "" : "s";
+  return platings;
 }

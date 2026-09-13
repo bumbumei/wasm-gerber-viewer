@@ -71,7 +71,7 @@ export async function collectOdbLayerSourcesFromTree(
   if (sources.length === 0) {
     throw new Error(`${jobLabel}: step ${stepName} has no importable board layers`);
   }
-  onArchiveInfo(jobLabel, `${sources.length} ODB++ layers converted from step ${stepName}`);
+  onArchiveInfo(jobLabel, `${sources.length} ODB++ layers imported from step ${stepName}`);
   return sources;
 }
 

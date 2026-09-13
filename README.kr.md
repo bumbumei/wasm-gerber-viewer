@@ -31,7 +31,7 @@ PCB 시각화를 위한 WASM/WebGL2 기반 Gerber 파일 뷰어입니다.
 - WASM과 WebGL2를 이용한 하드웨어 가속 렌더링
 - RS-274X Gerber 렌더링 지원
 - NC drill 오버레이 렌더링 지원
-- ODB++ 잡 가져오기 지원 (`.tgz`/`.tar.gz`/`.tar`, ODB++ 트리가 든 `.zip`, 폴더 드롭; 잡 내부의 `.Z`/`.gz` 압축 파일 처리) - 보드 레이어, 드릴, 스텝 profile 을 브라우저에서 Gerber/Excellon 으로 변환하고 사용자 정의 심볼도 전개
+- ODB++ 잡 가져오기 지원 (`.tgz`/`.tar.gz`/`.tar`, ODB++ 트리가 든 `.zip`, 폴더 드롭; 잡 내부의 `.Z`/`.gz` 압축 파일 처리) - 보드 레이어, 드릴, 스텝 profile 을 WASM 에서 바로 렌더 지오메트리로 파싱하고 사용자 정의 심볼도 전개
 - 모바일 기기 터치 조작 지원
 - 레이어별 색상, 투명도, 표시 여부 제어
 - Union, Intersection, Difference 및 사용자 지정 coverage 조합을 지원하는

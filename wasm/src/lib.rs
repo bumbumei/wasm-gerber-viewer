@@ -1,6 +1,7 @@
 mod drill;
 mod geometry;
 mod interaction;
+mod odb;
 mod parser;
 mod renderer;
 mod util;
@@ -192,6 +193,14 @@ fn drill_parse_result_to_js(drill: DrillParseResult) -> Result<JsValue, JsValue>
         &drill.metadata.to_js()?,
     )?;
     Ok(object.into())
+}
+
+/// Diagnostics of the most recent ODB++ layer parsed by this module instance
+/// ("Skipped or approximated: ..."), or `undefined` when there were none.
+/// Read it right after a parse or add call for an ODB++ layer envelope.
+#[wasm_bindgen]
+pub fn take_last_odb_diagnostics() -> Option<String> {
+    crate::odb::take_last_diagnostics()
 }
 
 #[wasm_bindgen]

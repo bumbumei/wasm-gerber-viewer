@@ -699,6 +699,7 @@ class GerberParseWorkerPool {
       task.resolve({
         renderPayload: event.data.parsedLayer,
         interactionPayload: event.data.interactionPayload ?? null,
+        odbDiagnostics: event.data.odbDiagnostics ?? null,
       });
     } else {
       const errorMessage = event.data.error || "Failed to parse Gerber layer";
@@ -4349,6 +4350,7 @@ export class GerberViewer {
       return {
         renderPayload: payload.renderPayload,
         interactionPayload: payload.interactionPayload ?? null,
+        odbDiagnostics: this.takeOdbDiagnostics(),
       };
     }
     if (parseOptions.interactionsEnabled) {
@@ -4376,6 +4378,7 @@ export class GerberViewer {
           parseOptions.arcTessellationQuality,
         ),
         interactionPayload: null,
+        odbDiagnostics: this.takeOdbDiagnostics(),
       };
     }
 
@@ -4394,7 +4397,24 @@ export class GerberViewer {
         normalizedOffset.y,
       ),
       interactionPayload: null,
+      odbDiagnostics: this.takeOdbDiagnostics(),
     };
+  }
+
+  /**
+   * ODB++ layers are parsed in WASM straight from their ODB++ files; the
+   * module records what it skipped or approximated for the layer it parsed
+   * last. Returns that note (or null) and clears it.
+   */
+  takeOdbDiagnostics(wasmModule = this.wasmModule) {
+    const take = wasmModule?.take_last_odb_diagnostics;
+    if (typeof take !== "function") return null;
+    const note = take();
+    return typeof note === "string" && note !== "" ? note : null;
+  }
+
+  reportOdbDiagnostics(name, note) {
+    if (note) this.addDiagnostic("warning", name, note);
   }
 
   async readAndParseLayerSource(
@@ -4439,11 +4459,12 @@ export class GerberViewer {
         current: progress.completedLayers,
         total,
       });
-      const { renderPayload, interactionPayload = null } = await this.parseLayerContent(
-        content,
-        source.offset,
-        parseWorkerPool,
-      );
+      const {
+        renderPayload,
+        interactionPayload = null,
+        odbDiagnostics = null,
+      } = await this.parseLayerContent(content, source.offset, parseWorkerPool);
+      this.reportOdbDiagnostics(name, odbDiagnostics);
       this.updateLoadingModal({
         stage: "Parsing",
         fileName: name,
@@ -4527,6 +4548,7 @@ export class GerberViewer {
             source.offset,
             null,
           );
+          this.reportOdbDiagnostics(name, parseResult.odbDiagnostics ?? null);
           renderPayload = parseResult.renderPayload;
           interactionPayload = parseResult.interactionPayload ?? null;
           layerRecord = await this.addParsedLayer(name, renderPayload, {
@@ -5307,6 +5329,7 @@ export class GerberViewer {
 
   async addDrillLayer(name, content, options = {}) {
     const layer = await this.createDrillLayerRecord(name, content, options);
+    this.reportOdbDiagnostics(name, this.takeOdbDiagnostics());
     return this.commitLayerMetadata(layer);
   }
 
