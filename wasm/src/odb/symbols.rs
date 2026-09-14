@@ -136,6 +136,11 @@ pub(crate) enum Shape {
 
 /// Parse a standard symbol name. Returns `None` when the name is not a
 /// standard symbol (i.e. a user-defined symbol).
+///
+/// A name is only standard when it matches the whole standard grammar:
+/// `<family><number>(x[rc]?<number>)*`, or `hole<number>(x<token>)*` for
+/// holes. Anything else (`r10_tp`, `rect_custom`, `s1_via`) is a
+/// user-defined symbol that lives in `symbols/<name>/features`.
 pub(crate) fn parse_standard_symbol(raw_name: &str, scale: f32) -> Option<Shape> {
     let name = raw_name.trim().to_lowercase();
     let prefix = PREFIXES.iter().copied().find(|candidate| {
@@ -167,7 +172,8 @@ pub(crate) fn parse_standard_symbol(raw_name: &str, scale: f32) -> Option<Shape>
     let mut flags: Vec<(u8, f32, String)> = Vec::new();
     for part in rest.split('x') {
         if part.is_empty() {
-            continue;
+            // A dangling separator (`r10x`) is not the standard grammar.
+            return None;
         }
         if part
             .bytes()
@@ -178,11 +184,8 @@ pub(crate) fn parse_standard_symbol(raw_name: &str, scale: f32) -> Option<Shape>
             } else {
                 match part.parse::<f32>() {
                     Ok(value) if value.is_finite() => dims.push(value * scale),
-                    _ => {
-                        return Some(Shape::Unsupported {
-                            fallback_diameter: None,
-                        })
-                    }
+                    // Digits and dots that do not form a number (`1.2.3`).
+                    _ => return None,
                 }
             }
         } else if (part.starts_with('r') || part.starts_with('c'))
@@ -194,9 +197,9 @@ pub(crate) fn parse_standard_symbol(raw_name: &str, scale: f32) -> Option<Shape>
             let size = part[1..].parse::<f32>().unwrap_or(0.0) * scale;
             flags.push((part.as_bytes()[0], size, String::new()));
         } else {
-            return Some(Shape::Unsupported {
-                fallback_diameter: dims.first().copied(),
-            });
+            // Not the standard grammar: a user-defined symbol whose name
+            // happens to start like a standard family.
+            return None;
         }
     }
     let unsupported = || Shape::Unsupported {

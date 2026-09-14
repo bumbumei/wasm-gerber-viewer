@@ -3,6 +3,7 @@ import test from "node:test";
 import { gzipSync } from "node:zlib";
 
 import { collectLayerSources } from "../../../js/loading/source-loader.js";
+import { isStandardSymbolName } from "../../../js/loading/odb/job-loader.js";
 import { assignLayerFileNames } from "../../../js/loading/odb/layer-naming.js";
 import { parseMatrix } from "../../../js/loading/odb/matrix.js";
 import { LayerFilterStore } from "../../../js/layers/layer-filters.js";
@@ -122,6 +123,26 @@ test("a .tgz ODB++ job becomes ordered layer sources with Gerber-style names", a
     diagnostics.warnings.join("\n"),
   );
   assert.ok(diagnostics.infos.some((line) => /10 ODB\+\+ layers imported from step pcb/.test(line)));
+});
+
+test("only names that follow the whole standard grammar count as standard symbols", async () => {
+  for (const name of ["r15.748", "s800", "rect1400x800xr250x13", "hole1000xpx10x10", "thr1600x1000x45x4x300", "DONUT_R1200x600"]) {
+    assert.equal(isStandardSymbolName(name), true, name);
+  }
+  for (const name of ["r10_tp", "s1_via", "rect_custom", "r10x", "fiducial", "silk_kiro", "construct+71"]) {
+    assert.equal(isStandardSymbolName(name), false, name);
+  }
+
+  // A user symbol whose name starts like a standard family travels with the layer.
+  const { files } = buildSampleJobFiles();
+  files["demo_board/symbols/r10_tp/features"] = "UNITS=MM\n$0 r500\nP 0 0 0 P 0 0\n";
+  files["demo_board/steps/pcb/layers/bottom/features"] = "UNITS=MM\n$0 r10_tp\nP 5 5 0 P 0 0\n";
+  const sources = await collectLayerSources(
+    [makeArchiveFile(writeTgz(files), "demo_board.tgz")],
+    collectDiagnostics().callbacks,
+  );
+  const bottom = sources.find((source) => source.name === "bottom.gbl");
+  assert.match(await bottom.readText(), /%ODB\+\+FILE symbols\/r10_tp%\n/);
 });
 
 test("the same job inside a ZIP and as a dropped folder yields the same sources", async () => {

@@ -15,7 +15,9 @@ const REGULAR_TYPES = new Set(["0", "\0", "7"]);
  *
  * Mirrors the hardened reader used by the CLI: ustar checksum validation, GNU
  * long names (`L`), PAX extended headers (`x`/`g`), size/entry limits, path
- * normalization, and rejection of truncated archives.
+ * normalization, and rejection of truncated entries. Reading stops at the
+ * first zero block; an archive that ends without the end-of-archive marker
+ * is accepted as long as every entry read is complete.
  */
 export function parseTar(bytes, { archiveName = "archive" } = {}) {
   const entries = [];
@@ -24,15 +26,14 @@ export function parseTar(bytes, { archiveName = "archive" } = {}) {
   let totalBytes = 0;
   let nextLongName = null;
   let nextPaxHeaders = null;
-  let foundEndMarker = false;
+  let sawEndMarker = false;
 
   while (offset + BLOCK_SIZE <= bytes.length) {
     const header = bytes.subarray(offset, offset + BLOCK_SIZE);
     if (isZeroBlock(header)) {
-      if (!isZeroBlock(bytes.subarray(offset))) {
-        throw new Error(`${archiveName} contains data after its TAR end marker`);
-      }
-      foundEndMarker = true;
+      // End-of-archive marker. Whatever follows (padding, a second marker,
+      // trailing bytes) is not part of the archive and is not inspected.
+      sawEndMarker = true;
       break;
     }
 
@@ -120,8 +121,8 @@ export function parseTar(bytes, { archiveName = "archive" } = {}) {
     }
   }
 
-  if (!foundEndMarker) {
-    throw new Error(`${archiveName} is a truncated TAR archive (missing end marker)`);
+  if (!sawEndMarker && entryCount === 0) {
+    throw new Error(`${archiveName} is not a TAR archive (no entries found)`);
   }
   if (nextLongName != null || nextPaxHeaders != null) {
     throw new Error(`${archiveName} ends with TAR metadata that has no following entry`);

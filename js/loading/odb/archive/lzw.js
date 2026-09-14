@@ -66,9 +66,12 @@ export function decompressLzw(
     if (outLength + extra > maxOutputBytes) {
       throw new RangeError(`${label} expands beyond the ${maxOutputBytes}-byte limit`);
     }
+    // Double the buffer (capped at the output limit) so growth stays amortised
+    // O(n); growing to the exact size would copy the whole output per chunk.
     let next = output.length * 2;
     while (next < outLength + extra) next *= 2;
-    const grown = new Uint8Array(Math.min(next, Math.max(outLength + extra, 0)));
+    if (Number.isFinite(maxOutputBytes)) next = Math.min(next, maxOutputBytes);
+    const grown = new Uint8Array(next);
     grown.set(output.subarray(0, outLength));
     output = grown;
   };

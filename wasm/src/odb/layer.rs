@@ -423,6 +423,10 @@ impl Driver<'_> {
         let dx = line.xe - line.xs;
         let dy = line.ye - line.ys;
         let length = dx.hypot(dy);
+        if length <= f32::EPSILON || length.is_nan() {
+            // Degenerate line: flash the square instead of dividing by zero.
+            return self.interpolate(code, line.xs, line.ys, line.xs, line.ys, None);
+        }
         let (ux, uy) = (dx / length, dy / length);
         let half = width / 2.0;
         let (nx, ny) = (-uy * half, ux * half);

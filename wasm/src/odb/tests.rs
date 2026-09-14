@@ -173,6 +173,11 @@ fn standard_symbols_resolve_in_both_units() {
     assert_eq!(parse_standard_symbol("CUSTOMD294", MICRONS), None);
     assert_eq!(parse_standard_symbol("silk_kiro", MICRONS), None);
     assert_eq!(parse_standard_symbol("construct+71", MICRONS), None);
+    // Names that merely start like a standard family are user symbols.
+    assert_eq!(parse_standard_symbol("r10_tp", MICRONS), None);
+    assert_eq!(parse_standard_symbol("s1_via", MICRONS), None);
+    assert_eq!(parse_standard_symbol("rect_custom", MICRONS), None);
+    assert_eq!(parse_standard_symbol("r10x", MICRONS), None);
 
     let aperture = shape_to_aperture(&Shape::RoundedRect {
         w: 1.4,
@@ -394,6 +399,42 @@ fn user_symbols_expand_in_place_with_nesting_and_polarity() {
 }
 
 #[test]
+fn user_symbols_named_like_standard_families_are_expanded() {
+    // The maintainer's case: `r10_tp` is a user symbol, not `r10`.
+    let text = envelope(
+        "signal",
+        "UNITS=MM\n$0 r10_tp\nP 5 5 0 P 0 0\n",
+        &[("symbols/r10_tp", "UNITS=MM\n$0 r500\nP 0 0 0 P 0 0\n")],
+    );
+    let layers = parse_gerber_with_options(&text, true, 1).unwrap();
+    let (min_x, max_x, _, _) = layer_bounds(&layers);
+    assert_approx(min_x, 4.75);
+    assert_approx(max_x, 5.25);
+    assert_eq!(take_last_diagnostics(), None, "nothing skipped");
+}
+
+#[test]
+fn degenerate_square_lines_flash_instead_of_producing_nan() {
+    let text = envelope(
+        "signal",
+        "UNITS=MM\n$0 s400\nL 3 3 3 3 0 P 0\nL 7 7 7.00000001 7 0 P 0\n",
+        &[],
+    );
+    let layers = parse_gerber_with_options(&text, true, 1).unwrap();
+    for layer in &layers {
+        assert!(layer
+            .triangles
+            .vertices
+            .iter()
+            .all(|value| value.is_finite()));
+        assert!(layer.boundary.min_x().is_finite() && layer.boundary.max_y().is_finite());
+    }
+    let (min_x, max_x, _, _) = layer_bounds(&layers);
+    assert_approx(min_x, 2.8);
+    assert_approx(max_x, 7.2);
+}
+
+#[test]
 fn placement_composes_orientation_and_mirrors_arcs() {
     let symbol = parse_features(
         "UNITS=MM\n$0 rect1000x500\n$1 r100\nP 1 0 0 P 0 8 30\nA 1 0 0 1 0 0 1 P 0 N\n",
@@ -472,6 +513,25 @@ fn drill_layers_split_by_plating_and_keep_slots_and_arcs() {
         parse_drill_with_offset(&drill_envelope("all", features, tools), 0.0, 5.0, 0.0).unwrap();
     assert_eq!(all.metadata.hit_count, 3);
     assert_approx(all.fill_layer.boundary.min_x(), 5.0 + 1.0 - 0.15);
+
+    // A tools file without UNITS follows the layer's units (mm here), so the
+    // 1000 finish size is 1 mm and matches the non-plated tool by size.
+    let tools_no_units = "TOOLS {\n NUM=2\n TYPE=NON_PLATED\n FINISH_SIZE=1000\n}\n";
+    let by_size = parse_drill_with_offset(
+        &drill_envelope(
+            "non_plated",
+            "UNITS=MM\n$0 r1000\nP 5 5 0 P 9 0\n",
+            tools_no_units,
+        ),
+        0.0,
+        0.0,
+        0.0,
+    )
+    .unwrap();
+    assert_eq!(
+        by_size.metadata.hit_count, 1,
+        "matched by size in layer units"
+    );
 }
 
 #[test]

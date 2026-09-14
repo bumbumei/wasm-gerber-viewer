@@ -4,7 +4,7 @@
 //! from the `tools` file.
 
 use super::envelope::{Envelope, Plating};
-use super::features::{parse_features, Record, Units};
+use super::features::{parse_features, Record};
 use super::symbols::{parse_standard_symbol, pen_diameter, resize_shape, solid_circle_diameter};
 use super::tools::{parse_tools, Tool, ToolType};
 use super::{store_diagnostics, Diagnostics};
@@ -15,9 +15,10 @@ const TOOL_MATCH_TOLERANCE_MM: f32 = 0.001;
 
 pub(crate) fn drive(parser: &mut DrillParser, envelope: &Envelope) -> Result<(), String> {
     let features = parse_features(envelope.features);
+    // A `tools` file without its own UNITS line follows the layer's units.
     let tools = envelope
         .tools
-        .map(|text| parse_tools(text, Units::Inch).tools)
+        .map(|text| parse_tools(text, features.units).tools)
         .unwrap_or_default();
     let mut diagnostics = Diagnostics {
         texts: features.counts.texts,

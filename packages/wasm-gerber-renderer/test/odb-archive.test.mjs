@@ -57,6 +57,44 @@ test("parseTar rejects truncated archives and checksum mismatches", () => {
   assert.throws(() => parseTar(corrupt, { archiveName: "bad.tar" }), /checksum/);
 });
 
+test("parseTar stops at the end marker and accepts archives that lack one", () => {
+  const bytes = writeTar({ "job/matrix/matrix": "STEP {\nNAME=pcb\n}\n" });
+  const endMarker = bytes.length - 1024;
+
+  // Trailing bytes after the end-of-archive marker are not inspected.
+  const trailing = new Uint8Array(bytes.length + 4096);
+  trailing.set(bytes);
+  trailing.fill(0x41, bytes.length);
+  assert.equal(parseTar(trailing, { archiveName: "trailing.tar" }).length, 1);
+
+  // No end marker at all: every entry read is complete, so the archive is fine.
+  const unterminated = bytes.subarray(0, endMarker);
+  assert.equal(parseTar(unterminated, { archiveName: "open.tar" }).length, 1);
+
+  // An entry whose data is cut off is still an error.
+  assert.throws(
+    () => parseTar(bytes.subarray(0, endMarker - 8), { archiveName: "cut.tar" }),
+    /truncated/,
+  );
+});
+
+test("LZW decoding time grows linearly with the output size", () => {
+  // The output buffer used to grow to the exact size on every chunk, which
+  // copied the whole output per chunk (quadratic). A 1 MB text took seconds.
+  let text = "";
+  for (let index = 0; index < 45000; index++) {
+    text += `P ${(index * 7919) % 100000} ${(index * 104729) % 100000} ${index % 13} P 0 ${index % 9}\n`;
+  }
+  const input = toBytes(text);
+  assert.ok(input.length > 800 * 1024, `input is ${input.length} bytes`);
+  const packed = compressLzw(input, { maxBits: 16 });
+  const start = performance.now();
+  const output = decompressLzw(packed);
+  const elapsed = performance.now() - start;
+  assert.equal(output.length, input.length);
+  assert.ok(elapsed < 1000, `decoding ${input.length} bytes took ${elapsed.toFixed(0)} ms`);
+});
+
 test("gunzip inflates and enforces the output cap", async () => {
   const text = "G04 hello*\n".repeat(500);
   const compressed = new Uint8Array(gzipSync(text));
