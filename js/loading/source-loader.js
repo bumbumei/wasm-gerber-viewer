@@ -22,6 +22,7 @@ import {
   collectOdbLayerSourcesFromTree,
   createOdbTreeFromFiles,
   createOdbTreeFromZip,
+  odbTreeOptions,
   isOdbArchiveFile,
   isOdbFileList,
   isOdbZip,
@@ -159,7 +160,11 @@ export async function collectLayerSources(files, callbacks = {}) {
   if (isOdbFileList(items)) {
     const label = getDroppedJobLabel(items);
     callbacks.onArchiveStart?.(label);
-    return collectOdbSources(createOdbTreeFromFiles(items), label, callbacks);
+    return collectOdbSources(
+      createOdbTreeFromFiles(items, odbTreeOptions(callbacks)),
+      label,
+      callbacks,
+    );
   }
 
   for (let index = 0; index < items.length; index++) {
@@ -319,9 +324,12 @@ async function collectZipLayerSources(file, callbacks = {}) {
     });
 
     if (odbJob) {
-      return await collectOdbSources(createOdbTreeFromZip(zip), file.name, callbacks, {
-        rethrow: true,
-      });
+      return await collectOdbSources(
+        createOdbTreeFromZip(zip, odbTreeOptions(callbacks)),
+        file.name,
+        callbacks,
+        { rethrow: true },
+      );
     }
 
     return await collectArchiveEntrySources(archiveEntries, file.name, callbacks);
@@ -339,7 +347,7 @@ async function collectTarLayerSources(file, callbacks = {}) {
   const { onArchiveError = () => {}, onArchiveStart = () => {} } = callbacks;
   try {
     onArchiveStart(file.name);
-    const { entries, tree } = await readTarArchive(file);
+    const { entries, tree } = await readTarArchive(file, odbTreeOptions(callbacks));
     if (tree.isOdbJob) {
       return await collectOdbSources(tree, file.name, callbacks, { rethrow: true });
     }

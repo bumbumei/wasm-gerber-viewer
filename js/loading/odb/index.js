@@ -19,7 +19,7 @@ export const ODB_STEP_QUERY_PARAM = "odbStep";
  * tree reports `isOdbJob === false` when the archive is a plain collection of
  * files (for example zipped Gerbers), which callers handle themselves.
  */
-export async function readTarArchive(file) {
+export async function readTarArchive(file, treeOptions = {}) {
   let bytes = new Uint8Array(await file.arrayBuffer());
   if (isGzipBytes(bytes)) {
     bytes = await gunzip(bytes, {
@@ -31,15 +31,20 @@ export async function readTarArchive(file) {
     });
   }
   const entries = parseTar(bytes, { archiveName: file.name });
-  return { entries, tree: createTarJobTree(entries) };
+  return { entries, tree: createTarJobTree(entries, treeOptions) };
 }
 
-export function createOdbTreeFromZip(zip) {
-  return createZipJobTree(zip);
+export function createOdbTreeFromZip(zip, treeOptions = {}) {
+  return createZipJobTree(zip, treeOptions);
 }
 
-export function createOdbTreeFromFiles(items) {
-  return createFileListJobTree(items);
+export function createOdbTreeFromFiles(items, treeOptions = {}) {
+  return createFileListJobTree(items, treeOptions);
+}
+
+/** Job-tree options taken from the loader callbacks (the `.Z` decoder). */
+export function odbTreeOptions(callbacks = {}) {
+  return { decompressUnixZ: callbacks.decompressUnixZ ?? null };
 }
 
 /**

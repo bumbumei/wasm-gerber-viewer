@@ -2,6 +2,7 @@ use super::envelope::{parse_envelope, LayerKind, Plating};
 use super::features::Units;
 use super::features::{parse_features, parse_orient, Record};
 use super::layer::{place_record, Placement};
+use super::lzw::{decompress_unix_z, is_unix_z};
 use super::symbols::{parse_standard_symbol, shape_to_aperture, Shape};
 use super::tools::parse_tools;
 use super::{is_odb_envelope, take_last_diagnostics};
@@ -532,6 +533,73 @@ fn drill_layers_split_by_plating_and_keep_slots_and_arcs() {
         by_size.metadata.hit_count, 1,
         "matched by size in layer units"
     );
+}
+
+/// The text every `.Z` fixture in `testdata/` was made from (by the test
+/// encoder that is cross-checked against GNU `gzip -d`).
+fn lzw_fixture_text() -> Vec<u8> {
+    let mut text = String::new();
+    for index in 0..600u64 {
+        text.push_str(&format!(
+            "P {} {} {} P 0 {}\n",
+            (index * 7919) % 1000,
+            (index * 104729) % 1000,
+            index % 13,
+            index % 9
+        ));
+    }
+    text.into_bytes()
+}
+
+#[test]
+fn unix_z_streams_decode_across_width_growth_clear_and_narrow_tables() {
+    let expected = lzw_fixture_text();
+    assert!(expected.len() > 10_000);
+    for (name, bytes) in [
+        (
+            "growth.Z (12-bit)",
+            &include_bytes!("testdata/growth.Z")[..],
+        ),
+        (
+            "clear.Z (16-bit, CLEAR every 700 codes)",
+            &include_bytes!("testdata/clear.Z")[..],
+        ),
+        (
+            "narrow.Z (9-bit, table fills)",
+            &include_bytes!("testdata/narrow.Z")[..],
+        ),
+    ] {
+        let output = decompress_unix_z(bytes, usize::MAX).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(output == expected, "{name} round trip");
+    }
+    assert_eq!(
+        decompress_unix_z(include_bytes!("testdata/kwkwk.Z"), usize::MAX).unwrap(),
+        b"abababababababab"
+    );
+    assert!(
+        decompress_unix_z(include_bytes!("testdata/empty.Z"), usize::MAX)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn unix_z_rejects_bad_input_and_caps_output() {
+    assert!(!is_unix_z(&[1, 2, 3]));
+    assert!(decompress_unix_z(&[1, 2, 3], usize::MAX)
+        .unwrap_err()
+        .contains("not in UNIX compress"));
+    assert!(
+        decompress_unix_z(&[0x1f, 0x9d, 0x08], usize::MAX).is_err(),
+        "bad code width"
+    );
+    let error = decompress_unix_z(include_bytes!("testdata/growth.Z"), 100).unwrap_err();
+    assert!(error.contains("could not be decompressed"), "{error}");
+    // A code that is not defined yet is corrupt data, not a panic.
+    let mut corrupt = include_bytes!("testdata/growth.Z").to_vec();
+    corrupt[3] = 0xff;
+    corrupt[4] = 0xff;
+    assert!(decompress_unix_z(&corrupt, usize::MAX).is_err());
 }
 
 #[test]

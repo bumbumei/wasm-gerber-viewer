@@ -8,9 +8,16 @@ import { assignLayerFileNames } from "../../../js/loading/odb/layer-naming.js";
 import { parseMatrix } from "../../../js/loading/odb/matrix.js";
 import { LayerFilterStore } from "../../../js/layers/layer-filters.js";
 import { isBoardOutlineLayerName } from "../shared.js";
-import { buildSampleJobFiles, matrixFile, toBytes, writeTar, writeTgz } from "./helpers/odb-fixture.mjs";
+import { buildSampleJobFiles as buildFixture, matrixFile, toBytes, writeTar, writeTgz } from "./helpers/odb-fixture.mjs";
+import { loadUnixZDecoder } from "./helpers/wasm-module.mjs";
 
 const decoder = new TextDecoder();
+// The sample job stores one layer as `features.Z`, which the WASM module
+// decodes. Without a built package the fixture keeps that layer uncompressed
+// so the loader tests still run.
+const decompressUnixZ = await loadUnixZDecoder();
+const buildSampleJobFiles = (options = {}) =>
+  buildFixture({ compressTopLayer: decompressUnixZ !== null, ...options });
 
 function makeArchiveFile(bytes, name, type = "") {
   const blob = new Blob([bytes], { type });
@@ -53,6 +60,7 @@ function collectDiagnostics() {
       onArchiveWarning: (name, message) => warnings.push(`${name}: ${message}`),
       onArchiveInfo: (name, message) => infos.push(`${name}: ${message}`),
       onArchiveError: (name, error) => errors.push({ name, error }),
+      decompressUnixZ,
     },
   };
 }
@@ -86,7 +94,7 @@ test("a .tgz ODB++ job becomes ordered layer sources with Gerber-style names", a
   assert.equal(diagnostics.errors.length, 0);
 
   const top = sources.find((source) => source.name === "top.gtl");
-  assert.equal(top.sizeBytes, toBytes(topFeatures).byteLength, "features.Z is decompressed for sizing");
+  assert.equal(top.sizeBytes, toBytes(topFeatures).byteLength, "a features.Z layer is decompressed for sizing");
   // The layer text is an envelope of the original ODB++ files: the features
   // file plus every user-defined symbol it references, nested ones included.
   const envelope = await top.readText();

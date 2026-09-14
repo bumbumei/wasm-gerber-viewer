@@ -4076,6 +4076,14 @@ export class GerberViewer {
         });
       },
       odbStepName: getInitialOdbStepName(),
+      // ODB++ files compressed with UNIX compress (.Z) are decoded in WASM.
+      decompressUnixZ: (bytes, maxOutputBytes) => {
+        const decompress = this.wasmModule?.decompress_unix_z;
+        if (typeof decompress !== "function") {
+          throw new Error("UNIX compress (.Z) files require an updated WASM module");
+        }
+        return decompress(bytes, maxOutputBytes);
+      },
       onFileStart: (name, current, total) => {
         this.updateLoadingModal({
           stage: "Preparing",

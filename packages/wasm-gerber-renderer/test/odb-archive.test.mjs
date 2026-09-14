@@ -3,13 +3,13 @@ import test from "node:test";
 import { gzipSync } from "node:zlib";
 
 import { gunzip, isGzipBytes } from "../../../js/loading/odb/archive/gzip.js";
-import { decompressLzw, isLzwBytes } from "../../../js/loading/odb/archive/lzw.js";
 import { parseTar } from "../../../js/loading/odb/archive/tar.js";
 import {
   JobTree,
   createTarJobTree,
   createZipJobTree,
   findOdbRoot,
+  isUnixZBytes,
 } from "../../../js/loading/odb/archive/job-tree.js";
 import {
   isOdbArchiveFile,
@@ -18,8 +18,13 @@ import {
 } from "../../../js/loading/odb/archive/detect.js";
 import { compressLzw } from "./helpers/lzw-encoder.mjs";
 import { toBytes, writeTar } from "./helpers/odb-fixture.mjs";
+import { loadUnixZDecoder } from "./helpers/wasm-module.mjs";
 
 const decoder = new TextDecoder();
+// `.Z` files are decoded by the WASM module; tests that need it skip when the
+// package has not been built (CI builds it before running these tests).
+const decompressUnixZ = await loadUnixZDecoder();
+const needsWasm = { skip: decompressUnixZ ? false : "wasm/pkg is not built" };
 
 test("parseTar reads regular files, ustar prefixes, and ignores directories", () => {
   const longDir = "a".repeat(60) + "/" + "b".repeat(60);
@@ -78,9 +83,9 @@ test("parseTar stops at the end marker and accepts archives that lack one", () =
   );
 });
 
-test("LZW decoding time grows linearly with the output size", () => {
-  // The output buffer used to grow to the exact size on every chunk, which
-  // copied the whole output per chunk (quadratic). A 1 MB text took seconds.
+test("LZW decoding time grows linearly with the output size", needsWasm, () => {
+  // The first JS decoder grew its output buffer to the exact size on every
+  // chunk (quadratic); a 1 MB text took seconds. The WASM decoder must stay linear.
   let text = "";
   for (let index = 0; index < 45000; index++) {
     text += `P ${(index * 7919) % 100000} ${(index * 104729) % 100000} ${index % 13} P 0 ${index % 9}\n`;
@@ -89,7 +94,7 @@ test("LZW decoding time grows linearly with the output size", () => {
   assert.ok(input.length > 800 * 1024, `input is ${input.length} bytes`);
   const packed = compressLzw(input, { maxBits: 16 });
   const start = performance.now();
-  const output = decompressLzw(packed);
+  const output = decompressUnixZ(packed, input.length);
   const elapsed = performance.now() - start;
   assert.equal(output.length, input.length);
   assert.ok(elapsed < 1000, `decoding ${input.length} bytes took ${elapsed.toFixed(0)} ms`);
@@ -104,7 +109,7 @@ test("gunzip inflates and enforces the output cap", async () => {
   await assert.rejects(gunzip(compressed, { maxOutputBytes: 100 }), RangeError);
 });
 
-test("LZW round-trips across code width changes, a CLEAR, and a full table", () => {
+test("LZW round-trips across code width changes, a CLEAR, and a full table", needsWasm, () => {
   let text = "";
   for (let index = 0; index < 4000; index++) {
     text += `P ${(index * 7919) % 1000} ${(index * 104729) % 1000} ${index % 13} P 0 ${index % 9}\n`;
@@ -119,23 +124,33 @@ test("LZW round-trips across code width changes, a CLEAR, and a full table", () 
     { maxBits: 10, clearAfterCodes: 3000 },
   ]) {
     const compressed = compressLzw(input, options);
-    assert.equal(isLzwBytes(compressed), true);
-    const output = decompressLzw(compressed);
+    assert.equal(isUnixZBytes(compressed), true);
+    const output = decompressUnixZ(compressed, input.length);
     assert.equal(decoder.decode(output), text, JSON.stringify(options));
   }
 });
 
-test("LZW handles the KwKwK case and small inputs", () => {
+test("LZW handles the KwKwK case and small inputs", needsWasm, () => {
   for (const sample of ["", "a", "aaaaaaaaaaaaaaaaaaaaaaaa", "abababababababab", "TOBEORNOTTOBEORTOBEORNOT"]) {
-    const output = decompressLzw(compressLzw(toBytes(sample)));
+    const output = decompressUnixZ(compressLzw(toBytes(sample)), 1024);
     assert.equal(decoder.decode(output), sample, JSON.stringify(sample));
   }
 });
 
-test("LZW rejects bad magic and caps output", () => {
-  assert.throws(() => decompressLzw(Uint8Array.from([1, 2, 3])), /not in UNIX compress/);
+test("LZW rejects bad magic and caps output", needsWasm, () => {
+  assert.equal(isUnixZBytes(Uint8Array.from([1, 2, 3])), false);
+  assert.throws(() => decompressUnixZ(Uint8Array.from([1, 2, 3]), 1024), /not in UNIX compress/);
   const compressed = compressLzw(toBytes("x".repeat(10_000)));
-  assert.throws(() => decompressLzw(compressed, { maxOutputBytes: 100 }), RangeError);
+  assert.throws(() => decompressUnixZ(compressed, 100), /could not be decompressed/);
+});
+
+test("JobTree reports .Z files clearly when no decoder is available", async () => {
+  const tar = writeTar({
+    "job/matrix/matrix": "STEP {\nNAME=pcb\n}\n",
+    "job/steps/pcb/layers/top/features.Z": compressLzw(toBytes("UNITS=MM\n")),
+  });
+  const tree = createTarJobTree(parseTar(tar));
+  await assert.rejects(tree.readBytes("steps/pcb/layers/top/features"), /requires the WASM module/);
 });
 
 test("findOdbRoot locates the job root, preferring the shallowest match", () => {
@@ -147,14 +162,14 @@ test("findOdbRoot locates the job root, preferring the shallowest match", () => 
   assert.equal(findOdbRoot(["job/matrix/matrix.txt"]), null);
 });
 
-test("JobTree resolves case-insensitively and decompresses .Z and .gz transparently", async () => {
+test("JobTree resolves case-insensitively and decompresses .Z and .gz transparently", needsWasm, async () => {
   const features = "UNITS=MM\n$0 r100\nP 1 2 0 P 0 0\n";
   const tar = writeTar({
     "job/matrix/matrix": "STEP {\nCOL=1\nNAME=pcb\n}\n",
     "job/steps/pcb/layers/top/features.Z": compressLzw(toBytes(features), { maxBits: 12 }),
     "job/steps/pcb/layers/bottom/features.gz": new Uint8Array(gzipSync(features)),
   });
-  const tree = createTarJobTree(parseTar(tar));
+  const tree = createTarJobTree(parseTar(tar), { decompressUnixZ });
   assert.equal(tree.isOdbJob, true);
   assert.equal(tree.root, "job/");
   assert.equal(tree.has("MATRIX/MATRIX"), true);
@@ -168,7 +183,7 @@ test("JobTree resolves case-insensitively and decompresses .Z and .gz transparen
   await assert.rejects(tree.readBytes("steps/pcb/layers/missing/features"), /missing/);
 });
 
-test("JobTree byte budget rejects oversized expansions", async () => {
+test("JobTree byte budget rejects oversized expansions", needsWasm, async () => {
   const tree = new JobTree(
     [
       {
@@ -182,7 +197,10 @@ test("JobTree byte budget rejects oversized expansions", async () => {
         readBytes: async () => compressLzw(toBytes("P 0 0 0 P 0 0\n".repeat(5000))),
       },
     ],
-    { budget: { charge(input, output) { if (output > 1000) throw new RangeError("too big"); } } },
+    {
+      budget: { charge(input, output) { if (output > 1000) throw new RangeError("too big"); } },
+      decompressUnixZ,
+    },
   );
   await assert.rejects(tree.readBytes("steps/pcb/layers/top/features"), /too big/);
 });

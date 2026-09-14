@@ -29,6 +29,7 @@ mod drill;
 mod envelope;
 mod features;
 mod layer;
+mod lzw;
 mod symbols;
 mod tools;
 
@@ -36,6 +37,7 @@ mod tools;
 mod tests;
 
 pub(crate) use envelope::is_odb_envelope;
+pub(crate) use lzw::decompress_unix_z;
 
 use crate::drill::DrillParser;
 use crate::parser::GerberParser;

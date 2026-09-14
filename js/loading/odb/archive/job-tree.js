@@ -1,5 +1,4 @@
 import { gunzip, isGzipBytes } from "./gzip.js";
-import { decompressLzw, isLzwBytes } from "./lzw.js";
 import { normalizeArchivePath } from "./tar.js";
 import {
   MAX_ARCHIVE_COMPRESSION_RATIO,
@@ -8,6 +7,11 @@ import {
 } from "../../../core/config.js";
 
 const MATRIX_PATH_PATTERN = /(?:^|\/)matrix\/matrix(?:\.z|\.gz)?$/i;
+
+/** UNIX `compress` magic (`1F 9D`); the stream itself is decoded in WASM. */
+export function isUnixZBytes(bytes) {
+  return Boolean(bytes) && bytes.length >= 3 && bytes[0] === 0x1f && bytes[1] === 0x9d;
+}
 const COMPRESSED_SUFFIXES = ["", ".Z", ".z", ".gz"];
 
 /**
@@ -60,10 +64,16 @@ export function createByteBudget({
  * Read-only view over an ODB++ job stored in a TAR, a ZIP, or a dropped folder.
  * Paths are addressed relative to the job root, matched case-insensitively,
  * and `.Z`/`.gz` compressed variants are resolved and decompressed
- * transparently.
+ * transparently. `.gz` uses `DecompressionStream`; `.Z` (UNIX compress) is
+ * decoded by the injected `decompressUnixZ(bytes, maxOutputBytes)`, which the
+ * viewer binds to the WASM module's `decompress_unix_z`.
  */
 export class JobTree {
-  constructor(entries, { root = null, budget = createByteBudget() } = {}) {
+  constructor(
+    entries,
+    { root = null, budget = createByteBudget(), decompressUnixZ = null } = {},
+  ) {
+    this.decompressUnixZ = decompressUnixZ;
     const normalized = entries
       .map((entry) => ({ ...entry, path: normalizeArchivePath(entry.path) }))
       .filter((entry) => entry.path !== "");
@@ -120,11 +130,18 @@ export class JobTree {
       this.budget.charge(raw.byteLength, output.byteLength, label);
       return output;
     }
-    if (isLzwBytes(raw)) {
-      const output = decompressLzw(raw, {
-        maxOutputBytes: MAX_FILE_SIZE_BYTES,
-        label,
-      });
+    if (isUnixZBytes(raw)) {
+      if (typeof this.decompressUnixZ !== "function") {
+        throw new Error(
+          `${label} is compressed with UNIX compress (.Z); decompressing it requires the WASM module`,
+        );
+      }
+      let output;
+      try {
+        output = await this.decompressUnixZ(raw, MAX_FILE_SIZE_BYTES);
+      } catch (error) {
+        throw new Error(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+      }
       this.budget.charge(raw.byteLength, output.byteLength, label);
       return output;
     }
