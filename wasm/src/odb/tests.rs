@@ -1,6 +1,6 @@
 use super::envelope::{parse_envelope, LayerKind, Plating};
 use super::features::Units;
-use super::features::{parse_features, parse_orient, Record};
+use super::features::{parse_features, parse_orient, Fields, Record};
 use super::layer::{place_record, Placement};
 use super::lzw::{decompress_unix_z, is_unix_z};
 use super::symbols::{parse_standard_symbol, shape_to_aperture, Shape};
@@ -129,10 +129,12 @@ fn features_parse_units_symbols_and_every_record_type() {
     assert_approx(pad.x, 25.4);
     assert_approx(inch.symbol_scale, MILS);
 
-    assert_eq!(parse_orient(&["P", "0"], 1).angle_deg, 0.0);
-    assert_eq!(parse_orient(&["P", "6"], 1).angle_deg, 180.0);
-    assert!(parse_orient(&["P", "6"], 1).mirror);
-    assert_eq!(parse_orient(&["P", "8", "-30"], 1).angle_deg, 330.0);
+    let orient = |text: &str| parse_orient(&mut Fields::new(text));
+    assert_eq!(orient("0").angle_deg, 0.0);
+    assert_eq!(orient("6").angle_deg, 180.0);
+    assert!(orient("6").mirror);
+    assert_eq!(orient("8 -30").angle_deg, 330.0);
+    assert!(orient("9 45").mirror);
 }
 
 #[test]
@@ -169,8 +171,23 @@ fn standard_symbols_resolve_in_both_units() {
     ));
     assert!(matches!(
         parse_standard_symbol("moire10x5x3x2x60x45", MICRONS),
-        Some(Shape::Unsupported { .. })
+        Some(Shape::Moire {
+            rings: 3,
+            angle_deg,
+            ..
+        }) if (angle_deg - 45.0).abs() < 1e-4
     ));
+    assert!(matches!(
+        parse_standard_symbol("oval_h1000x500", MICRONS),
+        Some(Shape::HalfOval { w, h }) if (w - 1.0).abs() < 1e-5 && (h - 0.5).abs() < 1e-5
+    ));
+    assert!(
+        matches!(
+            parse_standard_symbol("o_ths1000x500x45x4x100x50", MICRONS),
+            Some(Shape::Unsupported { .. })
+        ),
+        "families without a shape still fall back"
+    );
     assert_eq!(parse_standard_symbol("CUSTOMD294", MICRONS), None);
     assert_eq!(parse_standard_symbol("silk_kiro", MICRONS), None);
     assert_eq!(parse_standard_symbol("construct+71", MICRONS), None);

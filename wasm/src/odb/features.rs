@@ -2,8 +2,13 @@
 //! user-defined symbol definitions). Coordinates are converted to millimetres;
 //! symbol dimensions stay in the symbol table together with a `symbol_scale`
 //! (millimetres per thousandth of the file unit) for the symbol resolver.
+//!
+//! Records are read field by field from a whitespace iterator; no per-line
+//! token vector is allocated, which matters for layers with hundreds of
+//! thousands of lines.
 
 use std::collections::HashMap;
+use std::str::SplitAsciiWhitespace;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Units {
@@ -155,6 +160,38 @@ impl Features {
     }
 }
 
+/// The fields of one record, consumed left to right without allocating.
+pub(crate) struct Fields<'a> {
+    inner: SplitAsciiWhitespace<'a>,
+}
+
+impl<'a> Fields<'a> {
+    pub(crate) fn new(line: &'a str) -> Self {
+        Fields {
+            inner: line.split_ascii_whitespace(),
+        }
+    }
+
+    pub(crate) fn next_str(&mut self) -> Option<&'a str> {
+        self.inner.next()
+    }
+
+    /// The next field as a finite number, 0 when absent or malformed.
+    pub(crate) fn next_num(&mut self) -> f32 {
+        num(self.inner.next())
+    }
+
+    /// The next field as an integer, -1 when absent or malformed.
+    pub(crate) fn next_int(&mut self) -> i64 {
+        int(self.inner.next())
+    }
+
+    /// Whether the next field equals `expected` (consumes it either way).
+    pub(crate) fn next_is(&mut self, expected: &str) -> bool {
+        self.inner.next() == Some(expected)
+    }
+}
+
 pub(crate) fn parse_features(text: &str) -> Features {
     let mut units = Units::Inch;
     let mut scale = unit_scale(units);
@@ -193,14 +230,14 @@ pub(crate) fn parse_features(text: &str) -> Features {
         let first = line.as_bytes()[0];
 
         if first == b'$' {
-            let mut tokens = strip_attributes(line).split_ascii_whitespace();
-            let index = tokens
-                .next()
+            let mut fields = Fields::new(strip_attributes(line));
+            let index = fields
+                .next_str()
                 .and_then(|token| token[1..].parse::<i64>().ok());
-            let name = tokens.next();
+            let name = fields.next_str();
             if let (Some(index), Some(name)) = (index, name) {
-                let resize = tokens
-                    .next()
+                let resize = fields
+                    .next_str()
                     .and_then(|token| token.parse::<f32>().ok())
                     .filter(|value| value.is_finite())
                     .unwrap_or(0.0);
@@ -226,33 +263,26 @@ pub(crate) fn parse_features(text: &str) -> Features {
             continue;
         }
 
-        let cleaned = strip_attributes(line);
-        let tokens: Vec<&str> = cleaned.split_ascii_whitespace().collect();
-        let Some(record_type) = tokens.first() else {
+        let mut fields = Fields::new(strip_attributes(line));
+        let Some(record_type) = fields.next_str() else {
             continue;
         };
 
-        match *record_type {
+        match record_type {
             "P" => {
                 finish_surface(&mut surface, &mut polygon, &mut records, &mut counts);
                 // P x y apt polarity dcode orient   where apt = sym | -1 sym resize
-                let mut index = 1;
-                let x = num(tokens.get(index)) * scale;
-                let y = num(tokens.get(index + 1)) * scale;
-                index += 2;
-                let (sym, resize) = if tokens.get(index) == Some(&"-1") {
-                    let sym = int(tokens.get(index + 1));
-                    let resize = num(tokens.get(index + 2));
-                    index += 3;
-                    (sym, resize)
+                let x = fields.next_num() * scale;
+                let y = fields.next_num() * scale;
+                let apt = fields.next_str();
+                let (sym, resize) = if apt == Some("-1") {
+                    (fields.next_int(), fields.next_num())
                 } else {
-                    let sym = int(tokens.get(index));
-                    index += 1;
-                    (sym, 0.0)
+                    (int(apt), 0.0)
                 };
-                let neg = tokens.get(index) == Some(&"N");
-                let dcode = int(tokens.get(index + 1));
-                let orient = parse_orient(&tokens, index + 2);
+                let neg = fields.next_is("N");
+                let dcode = fields.next_int();
+                let orient = parse_orient(&mut fields);
                 records.push(Record::Pad(Pad {
                     x,
                     y,
@@ -266,68 +296,85 @@ pub(crate) fn parse_features(text: &str) -> Features {
             }
             "L" => {
                 finish_surface(&mut surface, &mut polygon, &mut records, &mut counts);
+                let xs = fields.next_num() * scale;
+                let ys = fields.next_num() * scale;
+                let xe = fields.next_num() * scale;
+                let ye = fields.next_num() * scale;
+                let sym = fields.next_int();
+                let neg = fields.next_is("N");
+                let dcode = fields.next_int();
                 records.push(Record::Line(Line {
-                    xs: num(tokens.get(1)) * scale,
-                    ys: num(tokens.get(2)) * scale,
-                    xe: num(tokens.get(3)) * scale,
-                    ye: num(tokens.get(4)) * scale,
-                    sym: int(tokens.get(5)),
-                    neg: tokens.get(6) == Some(&"N"),
-                    dcode: int(tokens.get(7)),
+                    xs,
+                    ys,
+                    xe,
+                    ye,
+                    sym,
+                    neg,
+                    dcode,
                 }));
                 counts.lines += 1;
             }
             "A" => {
                 finish_surface(&mut surface, &mut polygon, &mut records, &mut counts);
+                let xs = fields.next_num() * scale;
+                let ys = fields.next_num() * scale;
+                let xe = fields.next_num() * scale;
+                let ye = fields.next_num() * scale;
+                let xc = fields.next_num() * scale;
+                let yc = fields.next_num() * scale;
+                let sym = fields.next_int();
+                let neg = fields.next_is("N");
+                let dcode = fields.next_int();
+                let cw = fields.next_is("Y");
                 records.push(Record::Arc(Arc {
-                    xs: num(tokens.get(1)) * scale,
-                    ys: num(tokens.get(2)) * scale,
-                    xe: num(tokens.get(3)) * scale,
-                    ye: num(tokens.get(4)) * scale,
-                    xc: num(tokens.get(5)) * scale,
-                    yc: num(tokens.get(6)) * scale,
-                    sym: int(tokens.get(7)),
-                    neg: tokens.get(8) == Some(&"N"),
-                    dcode: int(tokens.get(9)),
-                    cw: tokens.get(10) == Some(&"Y"),
+                    xs,
+                    ys,
+                    xe,
+                    ye,
+                    xc,
+                    yc,
+                    sym,
+                    neg,
+                    dcode,
+                    cw,
                 }));
                 counts.arcs += 1;
             }
             "S" => {
                 finish_surface(&mut surface, &mut polygon, &mut records, &mut counts);
                 surface = Some(Surface {
-                    neg: tokens.get(1) == Some(&"N"),
+                    neg: fields.next_is("N"),
                     polygons: Vec::new(),
                 });
             }
             "OB" => {
                 if surface.is_some() {
                     finish_polygon(&mut surface, &mut polygon);
+                    let x0 = fields.next_num() * scale;
+                    let y0 = fields.next_num() * scale;
                     polygon = Some(Polygon {
-                        hole: tokens.get(3) == Some(&"H"),
-                        x0: num(tokens.get(1)) * scale,
-                        y0: num(tokens.get(2)) * scale,
+                        hole: fields.next_is("H"),
+                        x0,
+                        y0,
                         segments: Vec::new(),
                     });
                 }
             }
             "OS" => {
                 if let Some(polygon) = polygon.as_mut() {
-                    polygon.segments.push(Segment::Line {
-                        x: num(tokens.get(1)) * scale,
-                        y: num(tokens.get(2)) * scale,
-                    });
+                    let x = fields.next_num() * scale;
+                    let y = fields.next_num() * scale;
+                    polygon.segments.push(Segment::Line { x, y });
                 }
             }
             "OC" => {
                 if let Some(polygon) = polygon.as_mut() {
-                    polygon.segments.push(Segment::Arc {
-                        x: num(tokens.get(1)) * scale,
-                        y: num(tokens.get(2)) * scale,
-                        cx: num(tokens.get(3)) * scale,
-                        cy: num(tokens.get(4)) * scale,
-                        cw: tokens.get(5) == Some(&"Y"),
-                    });
+                    let x = fields.next_num() * scale;
+                    let y = fields.next_num() * scale;
+                    let cx = fields.next_num() * scale;
+                    let cy = fields.next_num() * scale;
+                    let cw = fields.next_is("Y");
+                    polygon.segments.push(Segment::Arc { x, y, cx, cy, cw });
                 }
             }
             "OE" => finish_polygon(&mut surface, &mut polygon),
@@ -358,11 +405,11 @@ pub(crate) fn parse_features(text: &str) -> Features {
 
 /// ODB++ pad orientation: 0-7 are legacy quarter turns (4-7 mirrored), 8 and 9
 /// are followed by a free angle (9 mirrored). Angles are clockwise degrees.
-pub(crate) fn parse_orient(tokens: &[&str], index: usize) -> Orient {
-    match tokens.get(index).copied() {
-        Some("8") | Some("9") => Orient {
-            angle_deg: normalize_angle(num(tokens.get(index + 1))),
-            mirror: tokens.get(index) == Some(&"9"),
+pub(crate) fn parse_orient(fields: &mut Fields<'_>) -> Orient {
+    match fields.next_str() {
+        Some(code @ ("8" | "9")) => Orient {
+            angle_deg: normalize_angle(fields.next_num()),
+            mirror: code == "9",
         },
         Some(code) => match code.parse::<u32>() {
             Ok(legacy) if legacy <= 7 => Orient {
@@ -400,14 +447,14 @@ fn strip_attributes(line: &str) -> &str {
     }
 }
 
-fn num(token: Option<&&str>) -> f32 {
+fn num(token: Option<&str>) -> f32 {
     token
         .and_then(|token| token.parse::<f32>().ok())
         .filter(|value| value.is_finite())
         .unwrap_or(0.0)
 }
 
-fn int(token: Option<&&str>) -> i64 {
+fn int(token: Option<&str>) -> i64 {
     token
         .and_then(|token| token.parse::<i64>().ok())
         .unwrap_or(-1)

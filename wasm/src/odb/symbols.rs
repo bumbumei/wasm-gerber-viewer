@@ -9,10 +9,46 @@ use crate::parser::{finalize_aperture, Aperture, ApertureKind};
 const OUTLINE_ARC_SEGMENTS: usize = 8;
 const ELLIPSE_SEGMENTS: usize = 64;
 
-// Longest prefixes first so `donut_sr` is not read as `donut_s` + "r...".
-const PREFIXES: [&str; 23] = [
-    "donut_sr", "donut_rc", "donut_r", "donut_s", "donut_o", "oval_h", "s_ths", "hex_l", "hex_s",
-    "moire", "rect", "oval", "hole", "ths", "thr", "tri", "oct", "bfr", "bfs", "el", "di", "r",
+// Every standard symbol family of the ODB++ specification (appendix A),
+// longest prefixes first so `donut_sr` is not read as `donut_s` + "r...".
+// Families without a dedicated shape still parse as standard symbols and fall
+// back to a circle instead of being mistaken for user-defined symbols.
+const PREFIXES: &[&str] = &[
+    "oblong_ths",
+    "radhplate",
+    "donut_sr",
+    "donut_rc",
+    "donut_r",
+    "donut_s",
+    "donut_o",
+    "fhplate",
+    "rhplate",
+    "dogbone",
+    "oval_h",
+    "sr_ths",
+    "rc_tho",
+    "rc_ths",
+    "dshape",
+    "hplate",
+    "o_ths",
+    "s_tho",
+    "s_thr",
+    "s_ths",
+    "hex_l",
+    "hex_s",
+    "moire",
+    "rect",
+    "oval",
+    "hole",
+    "ths",
+    "thr",
+    "tri",
+    "oct",
+    "bfr",
+    "bfs",
+    "el",
+    "di",
+    "r",
     "s",
 ];
 
@@ -120,6 +156,25 @@ pub(crate) enum Shape {
     Ellipse {
         w: f32,
         h: f32,
+    },
+    /// `oval_h<w>x<h>`: an oval of width `w` cut along its long axis, so the
+    /// flat edge is at the bottom and the height is `h`.
+    HalfOval {
+        w: f32,
+        h: f32,
+    },
+    /// `moire<rw>x<rg>x<nr>x<lw>x<ll>x<la>`: concentric rings of width `rw`
+    /// separated by `rg`, at most `nr` of them, inside a crosshair of line
+    /// width `lw`, length `ll` and angle `la` degrees. The outermost ring's
+    /// outer diameter equals the crosshair length, as in the Gerber moire
+    /// primitive, and rings are laid inwards from there.
+    Moire {
+        ring_width: f32,
+        ring_gap: f32,
+        rings: u32,
+        line_width: f32,
+        line_length: f32,
+        angle_deg: f32,
     },
     ButterflyRound {
         d: f32,
@@ -236,6 +291,21 @@ pub(crate) fn parse_standard_symbol(raw_name: &str, scale: f32) -> Option<Shape>
         },
         "oval" => match (dim(0), dim(1)) {
             (Some(w), Some(h)) => Shape::Oval { w, h },
+            _ => unsupported(),
+        },
+        "oval_h" => match (dim(0), dim(1)) {
+            (Some(w), Some(h)) => Shape::HalfOval { w, h },
+            _ => unsupported(),
+        },
+        "moire" => match (dim(0), dim(1), dim(2), dim(3), dim(4), dim(5)) {
+            (Some(rw), Some(rg), Some(nr), Some(lw), Some(ll), Some(la)) => Shape::Moire {
+                ring_width: rw,
+                ring_gap: rg,
+                rings: (nr / scale).round().max(0.0) as u32,
+                line_width: lw,
+                line_length: ll,
+                angle_deg: la / scale,
+            },
             _ => unsupported(),
         },
         "di" => match (dim(0), dim(1)) {
@@ -366,6 +436,25 @@ pub(crate) fn resize_shape(shape: &Shape, delta: f32) -> Shape {
             base: grow(base),
             h: grow(h),
         },
+        Shape::HalfOval { w, h } => Shape::HalfOval {
+            w: grow(w),
+            h: grow(h),
+        },
+        Shape::Moire {
+            ring_width,
+            ring_gap,
+            rings,
+            line_width,
+            line_length,
+            angle_deg,
+        } => Shape::Moire {
+            ring_width,
+            ring_gap,
+            rings,
+            line_width,
+            line_length: grow(line_length),
+            angle_deg,
+        },
         Shape::Thermal {
             od,
             id,
@@ -418,6 +507,8 @@ pub(crate) fn pen_diameter(shape: &Shape) -> f32 {
         | Shape::DonutSquareRound { od, .. } => *od,
         Shape::DonutRect { ow, oh, .. } | Shape::DonutOval { ow, oh, .. } => ow.min(*oh),
         Shape::Triangle { base, h } => base.min(*h),
+        Shape::HalfOval { w, h } => w.min(*h),
+        Shape::Moire { line_length, .. } => *line_length,
         Shape::Thermal { od, .. } => *od,
         Shape::ButterflyRound { d } => *d,
         Shape::ButterflySquare { s } => *s,
@@ -572,6 +663,31 @@ pub(crate) fn shape_to_aperture(shape: &Shape) -> Aperture {
             outline(&mut aperture, &points);
             aperture.kind = ApertureKind::Macro;
             set_size(&mut aperture, w, h);
+        }
+        Shape::HalfOval { w, h } => {
+            outline(&mut aperture, &half_oval_points(*w, *h));
+            aperture.kind = ApertureKind::Macro;
+            set_size(&mut aperture, *w, *h);
+        }
+        Shape::Moire {
+            ring_width,
+            ring_gap,
+            rings,
+            line_width,
+            line_length,
+            angle_deg,
+        } => {
+            moire(
+                &mut aperture,
+                *ring_width,
+                *ring_gap,
+                *rings,
+                *line_width,
+                *line_length,
+                *angle_deg,
+            );
+            aperture.kind = ApertureKind::Macro;
+            set_size(&mut aperture, *line_length, *line_length);
         }
         Shape::Triangle { base, h } => {
             outline(
@@ -787,6 +903,78 @@ fn ellipse_points(w: f32, h: f32) -> Vec<[f32; 2]> {
             [(w / 2.0) * angle.cos(), (h / 2.0) * angle.sin()]
         })
         .collect()
+}
+
+/// Half of an oval cut along its long axis: a flat bottom edge, straight
+/// sides and a rounded top with corner radius `min(h, w / 2)`. Centred on its
+/// own bounding box like every other symbol.
+fn half_oval_points(w: f32, h: f32) -> Vec<[f32; 2]> {
+    let r = h.min(w / 2.0).max(0.0);
+    let top = h / 2.0;
+    let bottom = -h / 2.0;
+    let mut points = vec![[-w / 2.0, bottom], [w / 2.0, bottom]];
+    if r > 0.0 {
+        // Right corner: up the side and over to the top edge, then the left corner.
+        points.extend(arc_points(
+            w / 2.0 - r,
+            top - r,
+            r,
+            0.0,
+            90.0,
+            OUTLINE_ARC_SEGMENTS,
+        ));
+        points.extend(arc_points(
+            -w / 2.0 + r,
+            top - r,
+            r,
+            90.0,
+            180.0,
+            OUTLINE_ARC_SEGMENTS,
+        ));
+    } else {
+        points.push([w / 2.0, top]);
+        points.push([-w / 2.0, top]);
+    }
+    points
+}
+
+/// Concentric rings inside a crosshair (ODB++ `moire`).
+fn moire(
+    aperture: &mut Aperture,
+    ring_width: f32,
+    ring_gap: f32,
+    rings: u32,
+    line_width: f32,
+    line_length: f32,
+    angle_deg: f32,
+) {
+    let mut outer_radius = line_length / 2.0;
+    for _ in 0..rings {
+        if outer_radius <= 0.0 || ring_width <= 0.0 {
+            break;
+        }
+        let inner_radius = (outer_radius - ring_width).max(0.0);
+        aperture.primitives.push(Primitive::Circle {
+            x: 0.0,
+            y: 0.0,
+            radius: outer_radius,
+            exposure: 1.0,
+            hole_x: 0.0,
+            hole_y: 0.0,
+            hole_radius: inner_radius,
+        });
+        outer_radius = inner_radius - ring_gap;
+    }
+    if line_width > 0.0 && line_length > 0.0 {
+        for extra in [0.0f32, 90.0] {
+            let angle = (angle_deg + extra).to_radians();
+            let (cos, sin) = (angle.cos(), angle.sin());
+            let (hl, hw) = (line_length / 2.0, line_width / 2.0);
+            let corners = [[-hl, -hw], [hl, -hw], [hl, hw], [-hl, hw]]
+                .map(|[x, y]| [x * cos - y * sin, x * sin + y * cos]);
+            outline(aperture, &corners);
+        }
+    }
 }
 
 fn arc_points(

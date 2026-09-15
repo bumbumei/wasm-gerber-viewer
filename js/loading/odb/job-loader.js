@@ -178,7 +178,7 @@ function sanitizeHeaderValue(value) {
  * Keep in sync with `parse_standard_symbol` in `wasm/src/odb/symbols.rs`.
  */
 const STANDARD_SYMBOL_PATTERN =
-  /^(?:hole[0-9.]+(?:x[a-z0-9.]+)*|(?:donut_sr|donut_rc|donut_r|donut_s|donut_o|oval_h|s_ths|hex_l|hex_s|moire|rect|oval|ths|thr|tri|oct|bfr|bfs|el|di|r|s)[0-9.]+(?:x[rc]?[0-9.]+)*)$/i;
+  /^(?:hole[0-9.]+(?:x[a-z0-9.]+)*|(?:oblong_ths|radhplate|donut_sr|donut_rc|donut_r|donut_s|donut_o|fhplate|rhplate|dogbone|oval_h|sr_ths|rc_tho|rc_ths|dshape|hplate|o_ths|s_tho|s_thr|s_ths|hex_l|hex_s|moire|rect|oval|ths|thr|tri|oct|bfr|bfs|el|di|r|s)[0-9.]+(?:x[rc]?[0-9.]+)*)$/i;
 
 export function isStandardSymbolName(name) {
   return STANDARD_SYMBOL_PATTERN.test(String(name ?? "").trim());
