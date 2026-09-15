@@ -3,7 +3,7 @@ use super::features::Units;
 use super::features::{parse_features, parse_orient, Fields, Record};
 use super::layer::{place_record, Placement};
 use super::lzw::{decompress_unix_z, is_unix_z};
-use super::symbols::{parse_standard_symbol, shape_to_aperture, Shape};
+use super::symbols::{parse_standard_symbol, shape_to_aperture, Shape, ThermalKind};
 use super::tools::parse_tools;
 use super::{is_odb_envelope, take_last_diagnostics};
 use crate::drill::{parse_drill_with_offset, parse_drill_with_offset_and_interactions};
@@ -165,7 +165,7 @@ fn standard_symbols_resolve_in_both_units() {
         parse_standard_symbol("thr1600x1000x45x4x300", MICRONS),
         Some(Shape::Thermal {
             spokes: 4,
-            square: false,
+            kind: ThermalKind::RoundRounded,
             ..
         })
     ));
@@ -213,12 +213,152 @@ fn standard_symbols_resolve_in_both_units() {
         angle_deg: 45.0,
         spokes: 4,
         gap: 0.3,
-        square: false,
+        kind: ThermalKind::RoundRounded,
     });
-    assert!(matches!(
-        thermal.primitives[0],
-        crate::parser::geometry::Primitive::Thermal { .. }
-    ));
+    assert!(!thermal.primitives.is_empty());
+    assert!(!thermal.has_negative, "thr is built from positive segments");
+    assert_approx(thermal.width, 1.6);
+}
+
+fn covers(aperture: &crate::parser::Aperture, x: f32, y: f32) -> bool {
+    use crate::parser::geometry::Primitive;
+    let mut inside = false;
+    for primitive in &aperture.primitives {
+        let (hit, exposure) = match primitive {
+            Primitive::Circle {
+                x: cx,
+                y: cy,
+                radius,
+                exposure,
+                hole_radius,
+                ..
+            } => {
+                let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+                (d <= *radius && d >= *hole_radius, *exposure)
+            }
+            Primitive::Triangle {
+                vertices, exposure, ..
+            } => {
+                let [a, b, c] = vertices;
+                let sign = |p: [f32; 2], q: [f32; 2]| {
+                    (q[0] - p[0]) * (y - p[1]) - (q[1] - p[1]) * (x - p[0])
+                };
+                let (s1, s2, s3) = (sign(*a, *b), sign(*b, *c), sign(*c, *a));
+                let neg = s1 < 0.0 || s2 < 0.0 || s3 < 0.0;
+                let pos = s1 > 0.0 || s2 > 0.0 || s3 > 0.0;
+                (!(neg && pos), *exposure)
+            }
+            _ => (false, 1.0),
+        };
+        if hit {
+            inside = exposure > 0.0;
+        }
+    }
+    inside
+}
+
+#[test]
+fn symbol_geometry_matches_reference_viewer() {
+    // Butterflies fill the upper-left and lower-right quadrants.
+    let bfr = shape_to_aperture(&Shape::ButterflyRound { d: 2.0 });
+    assert!(covers(&bfr, -0.5, 0.5));
+    assert!(covers(&bfr, 0.5, -0.5));
+    assert!(!covers(&bfr, 0.5, 0.5));
+    assert!(!covers(&bfr, -0.5, -0.5));
+    let bfs = shape_to_aperture(&Shape::ButterflySquare { s: 2.0 });
+    assert!(covers(&bfs, -0.9, 0.9));
+    assert!(covers(&bfs, 0.9, -0.9));
+    assert!(!covers(&bfs, 0.9, 0.9));
+    assert!(!covers(&bfs, -0.9, -0.9));
+
+    // Half oval: round end towards +x when wider than tall, apex at x = h.
+    let wide = shape_to_aperture(&Shape::HalfOval { w: 3.0, h: 1.0 });
+    assert!(covers(&wide, -1.9, 0.0));
+    assert!(covers(&wide, 0.95, 0.0));
+    assert!(!covers(&wide, 1.05, 0.0));
+    assert!(!covers(&wide, 0.9, 0.45));
+    assert!(covers(&wide, -1.0, 0.45));
+    let tall = shape_to_aperture(&Shape::HalfOval { w: 1.0, h: 3.0 });
+    assert!(covers(&tall, 0.0, -1.9));
+    assert!(covers(&tall, 0.0, 0.95));
+    assert!(!covers(&tall, 0.0, 1.05));
+
+    // Thermal rings are open at the spoke angles and solid between them.
+    let thr = shape_to_aperture(&Shape::Thermal {
+        od: 2.0,
+        id: 1.0,
+        angle_deg: 0.0,
+        spokes: 4,
+        gap: 0.2,
+        kind: ThermalKind::RoundRounded,
+    });
+    assert!(!covers(&thr, 0.75, 0.0), "gap centred on 0 degrees");
+    assert!(!covers(&thr, 0.0, 0.75), "gap centred on 90 degrees");
+    let (c45, s45) = (45f32.to_radians().cos(), 45f32.to_radians().sin());
+    assert!(covers(&thr, 0.75 * c45, 0.75 * s45), "solid at 45 degrees");
+    assert!(!covers(&thr, 0.0, 0.0), "centre is open");
+    let ths = shape_to_aperture(&Shape::Thermal {
+        od: 2.0,
+        id: 1.0,
+        angle_deg: 45.0,
+        spokes: 4,
+        gap: 0.2,
+        kind: ThermalKind::RoundSquared,
+    });
+    assert!(
+        !covers(&ths, 0.75 * c45, 0.75 * s45),
+        "gap centred on 45 degrees"
+    );
+    assert!(covers(&ths, 0.75, 0.0), "solid at 0 degrees");
+    let s_ths = shape_to_aperture(&Shape::Thermal {
+        od: 2.0,
+        id: 1.0,
+        angle_deg: 0.0,
+        spokes: 4,
+        gap: 0.2,
+        kind: ThermalKind::Square,
+    });
+    assert!(covers(&s_ths, 0.9, 0.9), "square ring reaches its corner");
+    assert!(!covers(&s_ths, 0.75, 0.0), "gap centred on 0 degrees");
+    assert!(!covers(&s_ths, 0.0, 0.0), "square centre is open");
+    let rc_ths = shape_to_aperture(&Shape::RectThermal {
+        w: 4.0,
+        h: 2.0,
+        angle_deg: 45.0,
+        spokes: 4,
+        gap: 0.2,
+        air_gap: 0.3,
+    });
+    assert!(covers(&rc_ths, 0.0, 0.85), "long side is solid");
+    assert!(!covers(&rc_ths, 1.85, 0.85), "diagonal gap cuts the corner");
+    assert!(!covers(&rc_ths, 0.0, 0.0));
+
+    // Moire: dot, then rings separated by the gap, from the centre outwards.
+    let moire = shape_to_aperture(&Shape::Moire {
+        ring_width: 0.2,
+        ring_gap: 0.3,
+        rings: 2,
+        line_width: 0.1,
+        line_length: 3.0,
+        angle_deg: 0.0,
+    });
+    // Probe along 45 degrees, away from the crosshair lines.
+    let at = |r: f32| (r * c45, r * s45);
+    let on_ring = |r: f32| {
+        let (x, y) = at(r);
+        covers(&moire, x, y)
+    };
+    assert!(on_ring(0.05), "centre dot");
+    assert!(!on_ring(0.25), "first gap");
+    assert!(on_ring(0.5), "first ring 0.4..0.6");
+    assert!(!on_ring(0.8), "second gap 0.6..0.9");
+    assert!(on_ring(1.0), "second ring 0.9..1.1");
+    assert!(!on_ring(1.2), "nothing past the last ring");
+    assert!(
+        covers(&moire, 1.4, 0.0),
+        "crosshair reaches the line length"
+    );
+    assert!(!covers(&moire, 1.4, 0.4));
 }
 
 #[test]

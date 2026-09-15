@@ -78,6 +78,19 @@ impl Corners {
     }
 }
 
+/// Outer and inner outline of a thermal ring, and how its gaps end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThermalKind {
+    /// `thr`: round ring, ring ends rounded.
+    RoundRounded,
+    /// `ths`: round ring, ring ends cut straight by the gap.
+    RoundSquared,
+    /// `s_ths`: square ring.
+    Square,
+    /// `sr_ths`: square outside, round inside.
+    SquareRound,
+}
+
 /// A standard symbol in millimetres.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Shape {
@@ -145,29 +158,42 @@ pub(crate) enum Shape {
         base: f32,
         h: f32,
     },
+    /// `thr`, `ths`, `s_ths`, `sr_ths`: a ring between the inner and outer
+    /// size, cut by `spokes` gaps of width `gap`, the first one centred on
+    /// `angle_deg` (counter-clockwise from +x).
     Thermal {
         od: f32,
         id: f32,
         angle_deg: f32,
         spokes: u32,
         gap: f32,
-        square: bool,
+        kind: ThermalKind,
+    },
+    /// `rc_ths<w>x<h>x<angle>x<spokes>x<gap>x<air_gap>`: a rectangular ring of
+    /// width `air_gap` cut by `spokes` gaps.
+    RectThermal {
+        w: f32,
+        h: f32,
+        angle_deg: f32,
+        spokes: u32,
+        gap: f32,
+        air_gap: f32,
     },
     Ellipse {
         w: f32,
         h: f32,
     },
-    /// `oval_h<w>x<h>`: an oval of width `w` cut along its long axis, so the
-    /// flat edge is at the bottom and the height is `h`.
+    /// `oval_h<w>x<h>`: half of an oval, i.e. one rounded end and one flat
+    /// end. The round end points +x when `w > h` (semicircle of diameter `h`)
+    /// and +y otherwise (semicircle of diameter `w`); see `half_oval_points`.
     HalfOval {
         w: f32,
         h: f32,
     },
-    /// `moire<rw>x<rg>x<nr>x<lw>x<ll>x<la>`: concentric rings of width `rw`
-    /// separated by `rg`, at most `nr` of them, inside a crosshair of line
-    /// width `lw`, length `ll` and angle `la` degrees. The outermost ring's
-    /// outer diameter equals the crosshair length, as in the Gerber moire
-    /// primitive, and rings are laid inwards from there.
+    /// `moire<rw>x<rg>x<nr>x<lw>x<ll>x<la>`: a central dot of diameter `rw`
+    /// and `nr` concentric rings of width `rw`, each separated by `rg`, plus a
+    /// crosshair of line width `lw`, length `ll` and angle `la` degrees with
+    /// rounded line ends.
     Moire {
         ring_width: f32,
         ring_gap: f32,
@@ -349,15 +375,33 @@ pub(crate) fn parse_standard_symbol(raw_name: &str, scale: f32) -> Option<Shape>
             (Some(base), Some(h)) => Shape::Triangle { base, h },
             _ => unsupported(),
         },
-        "thr" | "ths" | "s_ths" => match (dim(0), dim(1), dim(2), dim(3), dim(4)) {
+        "thr" | "ths" | "s_ths" | "sr_ths" => match (dim(0), dim(1), dim(2), dim(3), dim(4)) {
             (Some(od), Some(id), Some(angle), Some(spokes), Some(gap)) => Shape::Thermal {
                 od,
                 id,
                 angle_deg: angle / scale,
                 spokes: (spokes / scale).round().max(0.0) as u32,
                 gap,
-                square: prefix == "s_ths",
+                kind: match prefix {
+                    "thr" => ThermalKind::RoundRounded,
+                    "ths" => ThermalKind::RoundSquared,
+                    "s_ths" => ThermalKind::Square,
+                    _ => ThermalKind::SquareRound,
+                },
             },
+            _ => unsupported(),
+        },
+        "rc_ths" => match (dim(0), dim(1), dim(2), dim(3), dim(4), dim(5)) {
+            (Some(w), Some(h), Some(angle), Some(spokes), Some(gap), Some(air_gap)) => {
+                Shape::RectThermal {
+                    w,
+                    h,
+                    angle_deg: angle / scale,
+                    spokes: (spokes / scale).round().max(0.0) as u32,
+                    gap,
+                    air_gap,
+                }
+            }
             _ => unsupported(),
         },
         "el" => match (dim(0), dim(1)) {
@@ -461,14 +505,29 @@ pub(crate) fn resize_shape(shape: &Shape, delta: f32) -> Shape {
             angle_deg,
             spokes,
             gap,
-            square,
+            kind,
         } => Shape::Thermal {
             od: grow(od),
             id,
             angle_deg,
             spokes,
             gap,
-            square,
+            kind,
+        },
+        Shape::RectThermal {
+            w,
+            h,
+            angle_deg,
+            spokes,
+            gap,
+            air_gap,
+        } => Shape::RectThermal {
+            w: grow(w),
+            h: grow(h),
+            angle_deg,
+            spokes,
+            gap,
+            air_gap,
         },
         Shape::Ellipse { w, h } => Shape::Ellipse {
             w: grow(w),
@@ -510,6 +569,7 @@ pub(crate) fn pen_diameter(shape: &Shape) -> f32 {
         Shape::HalfOval { w, h } => w.min(*h),
         Shape::Moire { line_length, .. } => *line_length,
         Shape::Thermal { od, .. } => *od,
+        Shape::RectThermal { w, h, .. } => w.min(*h),
         Shape::ButterflyRound { d } => *d,
         Shape::ButterflySquare { s } => *s,
         Shape::Unsupported { fallback_diameter } => fallback_diameter.unwrap_or(0.0),
@@ -593,20 +653,67 @@ pub(crate) fn shape_to_aperture(shape: &Shape) -> Aperture {
             od,
             id,
             angle_deg,
+            spokes,
             gap,
-            ..
+            kind,
         } => {
-            aperture.primitives.push(Primitive::Thermal {
-                x: 0.0,
-                y: 0.0,
-                outer_diameter: *od,
-                inner_diameter: *id,
-                gap_thickness: *gap,
-                rotation: angle_deg.to_radians(),
-                exposure: 1.0,
-            });
+            match kind {
+                ThermalKind::RoundRounded => {
+                    round_thermal_rounded(&mut aperture, *od, *id, *angle_deg, *spokes, *gap)
+                }
+                ThermalKind::RoundSquared => {
+                    round_thermal_squared(&mut aperture, *od, *id, *angle_deg, *spokes, *gap)
+                }
+                ThermalKind::Square => {
+                    rect(&mut aperture, *od, *od, 0.0);
+                    rect_exposure(&mut aperture, *id, *id, 0.0);
+                    thermal_gap_bars(&mut aperture, *od, *angle_deg, *spokes, *gap, |_| {
+                        [0.0, 0.0]
+                    });
+                }
+                ThermalKind::SquareRound => {
+                    rect(&mut aperture, *od, *od, 0.0);
+                    circle_exposure(&mut aperture, *id, 0.0);
+                    thermal_gap_bars(&mut aperture, *od, *angle_deg, *spokes, *gap, |_| {
+                        [0.0, 0.0]
+                    });
+                }
+            }
             aperture.kind = ApertureKind::Macro;
             set_size(&mut aperture, *od, *od);
+        }
+        Shape::RectThermal {
+            w,
+            h,
+            angle_deg,
+            spokes,
+            gap,
+            air_gap,
+        } => {
+            rect(&mut aperture, *w, *h, 0.0);
+            rect_exposure(&mut aperture, w - 2.0 * air_gap, h - 2.0 * air_gap, 0.0);
+            // Diagonal gaps are moved to the far corner of the longer side so
+            // the bar still cuts the ring, as the reference viewer does.
+            let (w_, h_) = (*w, *h);
+            thermal_gap_bars(
+                &mut aperture,
+                w.max(*h),
+                *angle_deg,
+                *spokes,
+                *gap,
+                move |angle| {
+                    let snapped = (angle / 45.0).ceil() * 45.0;
+                    if (snapped as i32) % 90 == 0 {
+                        [0.0, 0.0]
+                    } else if w_ > h_ {
+                        [(w_ - h_) / 2.0 * snapped.to_radians().cos().signum(), 0.0]
+                    } else {
+                        [0.0, (h_ - w_) / 2.0 * snapped.to_radians().sin().signum()]
+                    }
+                },
+            );
+            aperture.kind = ApertureKind::Macro;
+            set_size(&mut aperture, *w, *h);
         }
         Shape::RoundedRect { w, h, r, corners } => {
             outline(&mut aperture, &rounded_rect_points(*w, *h, *r, *corners));
@@ -707,20 +814,21 @@ pub(crate) fn shape_to_aperture(shape: &Shape) -> Aperture {
             set_size(&mut aperture, *w, *h);
         }
         Shape::ButterflyRound { d } => {
+            // The filled quadrants are the upper-left and lower-right ones.
             let r = d / 2.0;
-            let mut upper = vec![[0.0, 0.0]];
-            upper.extend(arc_points(0.0, 0.0, r, 0.0, 90.0, OUTLINE_ARC_SEGMENTS));
-            let mut lower = vec![[0.0, 0.0]];
-            lower.extend(arc_points(0.0, 0.0, r, 180.0, 270.0, OUTLINE_ARC_SEGMENTS));
-            outline(&mut aperture, &upper);
-            outline(&mut aperture, &lower);
+            let mut upper_left = vec![[0.0, 0.0]];
+            upper_left.extend(arc_points(0.0, 0.0, r, 90.0, 180.0, OUTLINE_ARC_SEGMENTS));
+            let mut lower_right = vec![[0.0, 0.0]];
+            lower_right.extend(arc_points(0.0, 0.0, r, 270.0, 360.0, OUTLINE_ARC_SEGMENTS));
+            outline(&mut aperture, &upper_left);
+            outline(&mut aperture, &lower_right);
             aperture.kind = ApertureKind::Macro;
             set_size(&mut aperture, *d, *d);
         }
         Shape::ButterflySquare { s } => {
             let s = s / 2.0;
-            outline(&mut aperture, &[[0.0, 0.0], [s, 0.0], [s, s], [0.0, s]]);
-            outline(&mut aperture, &[[0.0, 0.0], [-s, 0.0], [-s, -s], [0.0, -s]]);
+            outline(&mut aperture, &[[-s, 0.0], [0.0, 0.0], [0.0, s], [-s, s]]);
+            outline(&mut aperture, &[[0.0, -s], [s, -s], [s, 0.0], [0.0, 0.0]]);
             aperture.kind = ApertureKind::Macro;
             set_size(&mut aperture, 2.0 * s, 2.0 * s);
         }
@@ -905,40 +1013,33 @@ fn ellipse_points(w: f32, h: f32) -> Vec<[f32; 2]> {
         .collect()
 }
 
-/// Half of an oval cut along its long axis: a flat bottom edge, straight
-/// sides and a rounded top with corner radius `min(h, w / 2)`. Centred on its
-/// own bounding box like every other symbol.
+/// Half of an oval: one rounded end and one flat end, matching the reference
+/// viewer (QCamber `HalfOvalSymbol`). For `w > h` the shape is the part of a
+/// `2h` by `h` oval to the right of `x = h - w`, so the round end points +x and
+/// its apex is at `x = h`; otherwise the round end points +y with its apex at
+/// `y = w` and the flat end at `y = w - h`.
 fn half_oval_points(w: f32, h: f32) -> Vec<[f32; 2]> {
-    let r = h.min(w / 2.0).max(0.0);
-    let top = h / 2.0;
-    let bottom = -h / 2.0;
-    let mut points = vec![[-w / 2.0, bottom], [w / 2.0, bottom]];
-    if r > 0.0 {
-        // Right corner: up the side and over to the top edge, then the left corner.
-        points.extend(arc_points(
-            w / 2.0 - r,
-            top - r,
-            r,
-            0.0,
-            90.0,
-            OUTLINE_ARC_SEGMENTS,
-        ));
-        points.extend(arc_points(
-            -w / 2.0 + r,
-            top - r,
-            r,
-            90.0,
-            180.0,
-            OUTLINE_ARC_SEGMENTS,
-        ));
+    let mut points = Vec::new();
+    if w > h {
+        let r = h / 2.0;
+        points.push([h - w, -r]);
+        points.push([r, -r]);
+        points.extend(arc_points(r, 0.0, r, -90.0, 90.0, 2 * OUTLINE_ARC_SEGMENTS));
+        points.push([h - w, r]);
     } else {
-        points.push([w / 2.0, top]);
-        points.push([-w / 2.0, top]);
+        let r = w / 2.0;
+        points.push([-r, w - h]);
+        points.push([r, w - h]);
+        points.push([r, r]);
+        points.extend(arc_points(0.0, r, r, 0.0, 180.0, 2 * OUTLINE_ARC_SEGMENTS));
+        points.push([-r, r]);
     }
     points
 }
 
-/// Concentric rings inside a crosshair (ODB++ `moire`).
+/// A central dot and concentric rings inside a crosshair (ODB++ `moire`),
+/// laid out from the centre outwards like the reference viewer: dot of
+/// diameter `rw`, then `nr` rings of width `rw` separated by `rg`.
 fn moire(
     aperture: &mut Aperture,
     ring_width: f32,
@@ -948,22 +1049,23 @@ fn moire(
     line_length: f32,
     angle_deg: f32,
 ) {
-    let mut outer_radius = line_length / 2.0;
-    for _ in 0..rings {
-        if outer_radius <= 0.0 || ring_width <= 0.0 {
-            break;
+    if ring_width > 0.0 {
+        circle(aperture, ring_width, 0.0);
+        let mut inner = ring_width / 2.0;
+        for _ in 0..rings {
+            inner += ring_gap;
+            let outer = inner + ring_width;
+            aperture.primitives.push(Primitive::Circle {
+                x: 0.0,
+                y: 0.0,
+                radius: outer,
+                exposure: 1.0,
+                hole_x: 0.0,
+                hole_y: 0.0,
+                hole_radius: inner,
+            });
+            inner = outer;
         }
-        let inner_radius = (outer_radius - ring_width).max(0.0);
-        aperture.primitives.push(Primitive::Circle {
-            x: 0.0,
-            y: 0.0,
-            radius: outer_radius,
-            exposure: 1.0,
-            hole_x: 0.0,
-            hole_y: 0.0,
-            hole_radius: inner_radius,
-        });
-        outer_radius = inner_radius - ring_gap;
     }
     if line_width > 0.0 && line_length > 0.0 {
         for extra in [0.0f32, 90.0] {
@@ -973,8 +1075,189 @@ fn moire(
             let corners = [[-hl, -hw], [hl, -hw], [hl, hw], [-hl, hw]]
                 .map(|[x, y]| [x * cos - y * sin, x * sin + y * cos]);
             outline(aperture, &corners);
+            for end in [-hl, hl] {
+                aperture.primitives.push(Primitive::Circle {
+                    x: end * cos,
+                    y: end * sin,
+                    radius: hw,
+                    exposure: 1.0,
+                    hole_x: 0.0,
+                    hole_y: 0.0,
+                    hole_radius: 0.0,
+                });
+            }
         }
     }
+}
+
+/// `thr`: ring segments with rounded ends. Each segment is a sector of the
+/// ring plus end caps of radius `(od - id) / 4` on the ring's centre line; the
+/// gap half-angle keeps the caps `gap` apart (QCamber `RoundThermalRoundSymbol`).
+fn round_thermal_rounded(
+    aperture: &mut Aperture,
+    od: f32,
+    id: f32,
+    angle_deg: f32,
+    spokes: u32,
+    gap: f32,
+) {
+    if spokes == 0 || od <= 0.0 {
+        return;
+    }
+    let cap_radius = (od - id) / 4.0;
+    let mid_radius = (od + id) / 4.0;
+    let half_gap = (gap / 2.0 + cap_radius).atan2(mid_radius).to_degrees();
+    let pie = 360.0 / spokes as f32;
+    let span = pie - 2.0 * half_gap;
+    if span <= 0.0 {
+        return;
+    }
+    for index in 0..spokes {
+        let start = angle_deg + index as f32 * pie + half_gap;
+        ring_sector(
+            aperture,
+            od / 2.0,
+            id / 2.0,
+            start,
+            start + span,
+            start,
+            start + span,
+        );
+        for end in [start, start + span] {
+            let angle = end.to_radians();
+            aperture.primitives.push(Primitive::Circle {
+                x: mid_radius * angle.cos(),
+                y: mid_radius * angle.sin(),
+                radius: cap_radius,
+                exposure: 1.0,
+                hole_x: 0.0,
+                hole_y: 0.0,
+                hole_radius: 0.0,
+            });
+        }
+    }
+}
+
+/// `ths`: ring segments cut straight by gaps of width `gap`, so the inner
+/// and outer arcs end at different angles (QCamber `RoundThermalSquareSymbol`).
+fn round_thermal_squared(
+    aperture: &mut Aperture,
+    od: f32,
+    id: f32,
+    angle_deg: f32,
+    spokes: u32,
+    gap: f32,
+) {
+    if spokes == 0 || od <= 0.0 {
+        return;
+    }
+    let half_angle = |diameter: f32| -> Option<f32> {
+        if diameter <= 0.0 {
+            return Some(0.0);
+        }
+        let ratio = gap / diameter;
+        (ratio < 1.0).then(|| ratio.asin().to_degrees())
+    };
+    let (Some(half_outer), Some(half_inner)) = (half_angle(od), half_angle(id)) else {
+        return;
+    };
+    let pie = 360.0 / spokes as f32;
+    for index in 0..spokes {
+        let base = angle_deg + index as f32 * pie;
+        let outer_start = base + half_outer;
+        let outer_end = base + pie - half_outer;
+        let inner_start = base + half_inner;
+        let inner_end = base + pie - half_inner;
+        if outer_end <= outer_start {
+            continue;
+        }
+        ring_sector(
+            aperture,
+            od / 2.0,
+            id / 2.0,
+            outer_start,
+            outer_end,
+            inner_start,
+            inner_end,
+        );
+    }
+}
+
+/// A ring sector between two radii: outer arc forwards, inner arc backwards.
+fn ring_sector(
+    aperture: &mut Aperture,
+    outer_radius: f32,
+    inner_radius: f32,
+    outer_start: f32,
+    outer_end: f32,
+    inner_start: f32,
+    inner_end: f32,
+) {
+    let segments = ((outer_end - outer_start).abs() / 6.0).ceil().max(2.0) as usize;
+    let mut points = arc_points(0.0, 0.0, outer_radius, outer_start, outer_end, segments);
+    if inner_radius > 0.0 && inner_end > inner_start {
+        points.extend(arc_points(
+            0.0,
+            0.0,
+            inner_radius,
+            inner_end,
+            inner_start,
+            segments,
+        ));
+    } else {
+        points.push([0.0, 0.0]);
+    }
+    outline(aperture, &points);
+}
+
+/// Subtract `spokes` gap bars of width `gap` from a thermal ring. Each bar runs
+/// from the centre outwards along its spoke angle (counter-clockwise from +x);
+/// `offset(angle)` moves a bar before rotation so rectangular rings can be cut
+/// at their corners.
+fn thermal_gap_bars(
+    aperture: &mut Aperture,
+    length: f32,
+    angle_deg: f32,
+    spokes: u32,
+    gap: f32,
+    offset: impl Fn(f32) -> [f32; 2],
+) {
+    if spokes == 0 || gap <= 0.0 {
+        return;
+    }
+    let pie = 360.0 / spokes as f32;
+    for index in 0..spokes {
+        let angle = angle_deg + index as f32 * pie;
+        let [dx, dy] = offset(angle);
+        let radians = angle.to_radians();
+        let (cos, sin) = (radians.cos(), radians.sin());
+        let corners = [
+            [0.0, -gap / 2.0],
+            [length, -gap / 2.0],
+            [length, gap / 2.0],
+            [0.0, gap / 2.0],
+        ]
+        .map(|[x, y]| [dx + x * cos - y * sin, dy + x * sin + y * cos]);
+        if let Ok(triangles) = triangulate_outline(&corners, 0.0) {
+            aperture.primitives.extend(triangles);
+        }
+    }
+}
+
+/// A circle primitive with the given exposure (used to clear ring centres).
+fn circle_exposure(aperture: &mut Aperture, diameter: f32, exposure: f32) {
+    if diameter <= 0.0 {
+        return;
+    }
+    aperture.primitives.push(Primitive::Circle {
+        x: 0.0,
+        y: 0.0,
+        radius: diameter / 2.0,
+        exposure,
+        hole_x: 0.0,
+        hole_y: 0.0,
+        hole_radius: 0.0,
+    });
 }
 
 fn arc_points(
