@@ -366,13 +366,23 @@ fn symbol_geometry_matches_reference_viewer() {
     assert!(!covers(&wide, 1.45, 0.4), "round end");
     assert!(covers(&wide, -1.45, 0.45), "square corners at the flat end");
     assert!(covers(&wide, 0.9, 0.45), "straight part ends at w/2 - h/2");
-    // Taller than wide: the right half of a 2w x h oval (corners of radius w at +x).
-    let tall = shape_to_aperture(&Shape::HalfOval { w: 1.0, h: 3.0 });
-    assert!(covers(&tall, -0.45, -1.45), "the -x side reaches -h/2");
-    assert!(!covers(&tall, 0.3, -1.45), "the bottom is the oval end");
-    assert!(covers(&tall, 0.45, 0.0), "straight +x edge");
-    assert!(!covers(&tall, 0.45, 1.45), "+x corners are rounded");
-    assert!(covers(&tall, -0.45, 1.45), "-x corners are square");
+    // Exactly twice as tall as wide: a half disc.
+    let half_disc = shape_to_aperture(&Shape::HalfOval { w: 1.0, h: 2.0 });
+    assert!(
+        covers(&half_disc, -0.45, 0.9),
+        "flat end spans the full height"
+    );
+    assert!(covers(&half_disc, 0.45, 0.0));
+    assert!(!covers(&half_disc, 0.45, 0.9), "semicircle of diameter h");
+    // Taller than twice the width: not drawn, like the official viewer.
+    assert_eq!(
+        parse_standard_symbol("oval_h1000x2800", MICRONS),
+        Some(Shape::Unsupported)
+    );
+    assert!(matches!(
+        parse_standard_symbol("oval_h1400x2800", MICRONS),
+        Some(Shape::HalfOval { .. })
+    ));
 
     // Thermal rings are open at the spoke angles and solid between them.
     let (c45, s45) = (45f32.to_radians().cos(), 45f32.to_radians().sin());
@@ -440,6 +450,25 @@ fn symbol_geometry_matches_reference_viewer() {
     );
     assert!(covers(&s_tho0, 0.4, 0.95));
     assert!(!covers(&s_tho0, 0.95, 0.95), "corner is still open");
+    // Two diagonal spokes: only their corners open, the other two stay closed.
+    let s_tho2 = shape_to_aperture(&thermal(2.4, 1.4, 45.0, 2, 0.3, ThermalKind::SquareOpen));
+    assert!(
+        !covers(&s_tho2, 0.95, 0.95),
+        "top-right corner opened by the 45 degree spoke"
+    );
+    assert!(
+        !covers(&s_tho2, -0.95, -0.95),
+        "bottom-left corner opened by the 225 degree spoke"
+    );
+    assert!(covers(&s_tho2, -0.95, 0.95), "top-left corner stays closed");
+    assert!(
+        covers(&s_tho2, 0.95, -0.95),
+        "bottom-right corner stays closed"
+    );
+    assert!(
+        covers(&s_tho2, -0.95, 0.0),
+        "left bar runs the full inner height"
+    );
     let rc_tho = shape_to_aperture(&rect_thermal(
         2.8,
         1.6,

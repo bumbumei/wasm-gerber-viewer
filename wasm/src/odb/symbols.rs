@@ -207,9 +207,9 @@ pub(crate) enum Shape {
         w: f32,
         h: f32,
     },
-    /// `oval_h<w>x<h>`: half of an oval, centred on its bounding box, with the
-    /// flat end at -x and the round end at +x (specification picture); see
-    /// `half_oval_points`.
+    /// `oval_h<w>x<h>` with `2w >= h`: half of an oval, centred on its
+    /// bounding box, with the flat end at -x and a semicircle of diameter `h`
+    /// at +x (specification picture); see `half_oval_points`.
     HalfOval {
         w: f32,
         h: f32,
@@ -374,7 +374,9 @@ pub(crate) fn parse_standard_symbol(raw_name: &str, scale: f32) -> Option<Shape>
             _ => Shape::Unsupported,
         },
         "oval_h" => match (len(0), len(1)) {
-            (Some(w), Some(h)) => Shape::HalfOval { w, h },
+            // A half oval needs room for its semicircle of diameter h; the
+            // official viewer draws nothing for taller shapes.
+            (Some(w), Some(h)) if 2.0 * w >= h => Shape::HalfOval { w, h },
             _ => Shape::Unsupported,
         },
         "moire" => match (len(0), len(1), count(2), len(3), len(4), num(5)) {
@@ -1151,39 +1153,22 @@ fn oval_inner_boundary(w: f32, h: f32) -> Option<Vec<[f32; 2]>> {
 
 /// Half of an oval, centred on its `w` x `h` bounding box, as the
 /// specification picture shows it: the flat end is at -x and the round end at
-/// +x. When the box is at least as wide as it is tall the round end is a
-/// semicircle of diameter `h`; otherwise it is the right half of a `2w` x `h`
-/// oval, i.e. the two +x corners are rounded with radius `w`.
+/// +x is a semicircle of diameter `h` (callers only build this for `2w >= h`;
+/// a narrower box has no room for the semicircle and is not drawn, which is
+/// what the official viewer does).
 fn half_oval_points(w: f32, h: f32) -> Vec<[f32; 2]> {
     let (hw, hh) = (w / 2.0, h / 2.0);
-    let mut points = Vec::new();
-    if 2.0 * w >= h {
-        let r = hh;
-        points.push([-hw, -hh]);
-        points.push([hw - r, -hh]);
-        points.extend(arc_points(
-            hw - r,
-            0.0,
-            r,
-            -90.0,
-            90.0,
-            2 * OUTLINE_ARC_SEGMENTS,
-        ));
-        points.push([-hw, hh]);
-    } else {
-        let r = w;
-        points.push([-hw, -hh]);
-        points.extend(arc_points(
-            -hw,
-            -(hh - r),
-            r,
-            -90.0,
-            0.0,
-            OUTLINE_ARC_SEGMENTS,
-        ));
-        points.extend(arc_points(-hw, hh - r, r, 0.0, 90.0, OUTLINE_ARC_SEGMENTS));
-        points.push([-hw, hh]);
-    }
+    let r = hh.min(w);
+    let mut points = vec![[-hw, -hh], [hw - r, -hh]];
+    points.extend(arc_points(
+        hw - r,
+        0.0,
+        r,
+        -90.0,
+        90.0,
+        2 * OUTLINE_ARC_SEGMENTS,
+    ));
+    points.push([-hw, hh]);
     points
 }
 
@@ -1561,15 +1546,49 @@ fn ring(aperture: &mut Aperture, outer: &[[f32; 2]], inner: Option<Vec<[f32; 2]>
     }
 }
 
-/// `s_tho` / `rc_tho`: the four straight bars of a ring whose corners are left
-/// open. Each bar spans the inner edge of its side at full ring width, and a
-/// spoke gap removes the part of the bar between the points where the gap's
+/// `s_tho` / `rc_tho` ("open corners"): the ring is four straight bars, each
+/// spanning the inner edge of its side at full ring width, plus the corner
+/// blocks that join them. A diagonal spoke opens the corner it points at; an
+/// axis-aligned spoke splits its bar and opens both corners of that side
+/// (official viewer behaviour: `0x4` leaves eight bars, `45x2` two L pieces).
+/// A spoke gap removes the part of a bar between the points where the gap's
 /// edges meet the bar's inner edge (a perpendicular cut, as in the
 /// specification pictures).
 fn open_corner_bars(aperture: &mut Aperture, ow: f32, oh: f32, lw: f32, cuts: &[Cut]) {
     let (iw, ih) = (ow - 2.0 * lw, oh - 2.0 * lw);
     if iw <= 0.0 || ih <= 0.0 || lw <= 0.0 {
         return;
+    }
+    // Corners 1..4 (top-right, top-left, bottom-left, bottom-right) stay
+    // closed unless a spoke opens them.
+    let mut closed = [true; 4];
+    for cut in cuts {
+        let step = (cut.angle_deg() / 45.0).round() as i32 % 8;
+        match step {
+            1 => closed[0] = false,
+            3 => closed[1] = false,
+            5 => closed[2] = false,
+            7 => closed[3] = false,
+            0 => (closed[0], closed[3]) = (false, false),
+            2 => (closed[0], closed[1]) = (false, false),
+            4 => (closed[1], closed[2]) = (false, false),
+            _ => (closed[2], closed[3]) = (false, false),
+        }
+    }
+    for (corner, keep) in closed.iter().enumerate() {
+        if !keep {
+            continue;
+        }
+        let [sx, sy] = CORNER_SIGNS[corner];
+        outline(
+            aperture,
+            &[
+                [sx * iw / 2.0, sy * ih / 2.0],
+                [sx * ow / 2.0, sy * ih / 2.0],
+                [sx * ow / 2.0, sy * oh / 2.0],
+                [sx * iw / 2.0, sy * oh / 2.0],
+            ],
+        );
     }
     // (inner edge base point, unit axis along the bar, half extent, outward normal)
     let bars = [
