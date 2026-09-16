@@ -169,7 +169,10 @@ test("the symbol board demo loads without diagnostics and references every symbo
 });
 
 test("only names that follow the whole standard grammar count as standard symbols", async () => {
-  for (const name of ["r15.748", "s800", "rect1400x800xr250x13", "hole1000xpx10x10", "thr1600x1000x45x4x300", "DONUT_R1200x600"]) {
+  for (const name of [
+    "r15.748", "s800", "rect1400x800xr250x13", "hole1000xpx10x10", "thr1600x1000x45x4x300", "DONUT_R1200x600",
+    "dogbone2400x1600x400x400x50xr", "cross2400x2400x400x400x50x50xs", "oblong_ths2800x1600x0x4x300x300xr", "dpack2400x2400x200x200x2x2",
+  ]) {
     assert.equal(isStandardSymbolName(name), true, name);
   }
   for (const name of ["r10_tp", "s1_via", "rect_custom", "r10x", "fiducial", "silk_kiro", "construct+71"]) {

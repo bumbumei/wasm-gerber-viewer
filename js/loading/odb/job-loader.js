@@ -173,12 +173,14 @@ function sanitizeHeaderValue(value) {
  * Standard symbol families are resolved by name inside WASM; anything else
  * that has a `symbols/<name>/features` file is a user-defined symbol whose
  * definition travels with the layer. A name is standard only when the whole
- * name follows the standard grammar (`<family><number>(x[rc]?<number>)*`, or
- * `hole<number>(x<token>)*`), so `r10_tp` or `rect_custom` are user symbols.
+ * name follows the standard grammar (`<family><number>(x([rc]?<number>|r|s))*`,
+ * where a bare `r`/`s` is the round/square style flag of `dogbone`, `cross` and
+ * `oblong_ths`, or `hole<number>(x<token>)*`), so `r10_tp` or `rect_custom`
+ * are user symbols.
  * Keep in sync with `parse_standard_symbol` in `wasm/src/odb/symbols.rs`.
  */
 const STANDARD_SYMBOL_PATTERN =
-  /^(?:hole[0-9.]+(?:x[a-z0-9.]+)*|(?:oblong_ths|radhplate|donut_sr|donut_rc|donut_r|donut_s|donut_o|fhplate|rhplate|dogbone|oval_h|sr_ths|rc_tho|rc_ths|dshape|hplate|o_ths|s_tho|s_thr|s_ths|hex_l|hex_s|moire|rect|oval|ths|thr|tri|oct|bfr|bfs|el|di|r|s)[0-9.]+(?:x[rc]?[0-9.]+)*)$/i;
+  /^(?:hole[0-9.]+(?:x[a-z0-9.]+)*|(?:oblong_ths|radhplate|donut_sr|donut_rc|donut_r|donut_s|donut_o|fhplate|rhplate|dogbone|oval_h|sr_ths|rc_tho|rc_ths|dshape|hplate|cross|dpack|o_ths|s_tho|s_thr|s_ths|hex_l|hex_s|moire|null|rect|oval|ths|thr|tri|oct|bfr|bfs|el|di|r|s)[0-9.]+(?:x(?:[rc]?[0-9.]+|[rs]))*)$/i;
 
 export function isStandardSymbolName(name) {
   return STANDARD_SYMBOL_PATTERN.test(String(name ?? "").trim());

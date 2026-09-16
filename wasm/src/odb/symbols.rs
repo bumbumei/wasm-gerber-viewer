@@ -28,6 +28,9 @@ const PREFIXES: &[&str] = &[
     "oblong_ths",
     "radhplate",
     "donut_sr",
+    "cross",
+    "dpack",
+    "null",
     "donut_rc",
     "donut_r",
     "donut_s",
@@ -238,9 +241,11 @@ pub(crate) enum Shape {
 /// standard symbol (i.e. a user-defined symbol).
 ///
 /// A name is only standard when it matches the whole standard grammar:
-/// `<family><number>(x[rc]?<number>)*`, or `hole<number>(x<token>)*` for
-/// holes. Anything else (`r10_tp`, `rect_custom`, `s1_via`) is a
-/// user-defined symbol that lives in `symbols/<name>/features`.
+/// `<family><number>(x([rc]?<number>|r|s))*` (a bare `r` or `s` is the
+/// round/square style flag of `dogbone`, `cross` and `oblong_ths`), or
+/// `hole<number>(x<token>)*` for holes. Anything else (`r10_tp`,
+/// `rect_custom`, `s1_via`) is a user-defined symbol that lives in
+/// `symbols/<name>/features`.
 pub(crate) fn parse_standard_symbol(raw_name: &str, scale: f32) -> Option<Shape> {
     let name = raw_name.trim().to_lowercase();
     let prefix = PREFIXES.iter().copied().find(|candidate| {
@@ -296,6 +301,11 @@ pub(crate) fn parse_standard_symbol(raw_name: &str, scale: f32) -> Option<Shape>
         {
             let size = part[1..].parse::<f32>().unwrap_or(0.0);
             flags.push((part.as_bytes()[0], size, String::new()));
+        } else if part == "r" || part == "s" {
+            // Round/square style of stencil symbols and oblong thermals
+            // (`dogbone...xr`, `cross...xs`, `oblong_ths...xr`); a following
+            // number is the corner radius.
+            flags.push((b's', 0.0, String::new()));
         } else {
             // Not the standard grammar: a user-defined symbol whose name
             // happens to start like a standard family.

@@ -218,6 +218,20 @@ fn standard_symbols_resolve_in_both_units() {
         Some(Shape::Unsupported),
         "standard families without geometry are recognised, reported and not drawn"
     );
+    // Stencil symbols and oblong thermals end in a bare `r`/`s` style flag.
+    for name in [
+        "dogbone2400x1600x400x400x50xr",
+        "cross2400x2400x400x400x50x50xs",
+        "oblong_ths2800x1600x0x4x300x300xr",
+        "dpack2400x2400x200x200x2x2",
+        "null1",
+    ] {
+        assert_eq!(
+            parse_standard_symbol(name, MICRONS),
+            Some(Shape::Unsupported),
+            "{name}"
+        );
+    }
     assert!(super::symbols::is_empty_shape(&Shape::Unsupported));
     assert!(shape_to_aperture(&Shape::Unsupported).primitives.is_empty());
     assert_eq!(parse_standard_symbol("CUSTOMD294", MICRONS), None);
