@@ -9,7 +9,7 @@ import { parseMatrix } from "../../../js/loading/odb/matrix.js";
 import { LayerFilterStore } from "../../../js/layers/layer-filters.js";
 import { isBoardOutlineLayerName } from "../shared.js";
 import { buildSampleJobFiles as buildFixture, matrixFile, toBytes, writeTar, writeTgz } from "./helpers/odb-fixture.mjs";
-import { buildSymbolBoardJobFiles } from "./helpers/odb-symbol-board.mjs";
+import { buildSymbolGalleryJobFiles, SYMBOL_GALLERY_NAMES } from "./helpers/odb-symbol-gallery.mjs";
 import { loadUnixZDecoder } from "./helpers/wasm-module.mjs";
 
 const decoder = new TextDecoder();
@@ -134,38 +134,39 @@ test("a .tgz ODB++ job becomes ordered layer sources with Gerber-style names", a
   assert.ok(diagnostics.infos.some((line) => /10 ODB\+\+ layers imported from step pcb/.test(line)));
 });
 
-test("the symbol board demo loads without diagnostics and references every symbol family it advertises", async () => {
-  const { files } = buildSymbolBoardJobFiles({ root: "symbol_board" });
+test("the symbol gallery demo loads without diagnostics and flashes every standard family", async () => {
+  const { files, width, height } = buildSymbolGalleryJobFiles({ root: "symbol_gallery" });
   const diagnostics = collectDiagnostics();
   const sources = await collectLayerSources(
-    [makeArchiveFile(writeTgz(files), "symbol_board.tgz")],
+    [makeArchiveFile(writeTgz(files), "symbol_gallery.tgz")],
     diagnostics.callbacks,
   );
 
-  assert.deepEqual(
-    sources.map((source) => source.name),
-    ["profile.gko", "sst.gto", "smt.gts", "top.gtl", "bottom.gbl", "smb.gbs", "drill-pth.drl", "drill-npth.drl"],
-  );
+  assert.deepEqual(sources.map((source) => source.name), ["profile.gko", "top.gtl"]);
   assert.equal(diagnostics.errors.length, 0);
   assert.deepEqual(diagnostics.warnings, [], "the committed demo converts completely");
+  assert.equal(width, 41);
+  assert.equal(height, 71);
 
   const top = await sources.find((source) => source.name === "top.gtl").readText();
-  const families = [
-    "thr", "ths", "s_ths", "sr_ths", "rc_ths", "rect", "di", "r", "s", "oval", "oval_h", "el", "tri",
-    "hex_l", "hex_s", "oct", "donut_r", "donut_s", "donut_sr", "donut_rc", "donut_o", "moire", "bfr", "bfs",
-  ];
   const declared = [...top.matchAll(/^\$\d+ (\S+)/gm)].map((match) => match[1]);
+  for (const name of SYMBOL_GALLERY_NAMES) {
+    assert.ok(declared.includes(name), `top layer declares ${name}`);
+    assert.ok(isStandardSymbolName(name), `${name} follows the standard grammar`);
+  }
+  // Every appendix A family with a geometry appears at least once.
+  const families = [
+    "r", "s", "rect", "oval", "oval_h", "di", "oct", "donut_r", "donut_s", "donut_sr", "donut_rc", "donut_o",
+    "hex_l", "hex_s", "bfr", "bfs", "tri", "el", "moire", "thr", "ths", "s_ths", "s_tho", "s_thr", "sr_ths",
+    "rc_ths", "rc_tho", "o_ths", "oblong_ths", "hplate", "rhplate", "radhplate", "dshape", "cross", "dogbone", "dpack",
+  ];
   for (const family of families) {
     assert.ok(
       declared.some((name) => new RegExp(`^${family}\\d`).test(name)),
-      `top layer declares a ${family} symbol`,
+      `gallery covers ${family}`,
     );
   }
-  assert.ok(declared.every((name) => isStandardSymbolName(name)), "copper uses standard symbols only");
-  const silk = await sources.find((source) => source.name === "sst.gto").readText();
-  assert.match(silk, /%ODB\+\+FILE symbols\/logo%\n/, "user-defined logo travels with the silkscreen");
-  const mask = await sources.find((source) => source.name === "smt.gts").readText();
-  assert.match(mask, /^P [\d.]+ [\d.]+ -1 \d+ 100 P 0 /m, "solder mask openings use resized pads");
+  assert.match(top, /%ODB\+\+FILE symbols\/lshape%\n/, "the asymmetric user symbol travels with the layer");
 });
 
 test("only names that follow the whole standard grammar count as standard symbols", async () => {

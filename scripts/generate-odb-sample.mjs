@@ -1,7 +1,7 @@
 // Generates the committed ODB++ demo jobs:
 //   demo/odb-sample.tgz        (gzip-compressed TAR, one layer stored as features.Z)
 //   demo/odb-sample.zip        (same tree as a ZIP)
-//   demo/odb-symbol-board.tgz  (a board-like job using most standard symbol families)
+//   demo/odb-symbol-gallery.tgz  (every standard symbol family on a grid)
 // Usage: node scripts/generate-odb-sample.mjs
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -13,7 +13,7 @@ import {
   toBytes,
   writeTgz,
 } from "../packages/wasm-gerber-renderer/test/helpers/odb-fixture.mjs";
-import { buildSymbolBoardJobFiles } from "../packages/wasm-gerber-renderer/test/helpers/odb-symbol-board.mjs";
+import { buildSymbolGalleryJobFiles } from "../packages/wasm-gerber-renderer/test/helpers/odb-symbol-gallery.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const demoDir = resolve(here, "../demo");
@@ -29,10 +29,10 @@ writeFileSync(resolve(demoDir, "odb-sample.zip"), zip);
 
 console.log(`demo/odb-sample.tgz ${tgz.length} bytes, demo/odb-sample.zip ${zip.length} bytes, ${Object.keys(files).length} files`);
 
-const symbolBoard = buildSymbolBoardJobFiles({ root: "symbol_board" });
-const symbolBoardTgz = writeTgz(symbolBoard.files);
-writeFileSync(resolve(demoDir, "odb-symbol-board.tgz"), symbolBoardTgz);
-console.log(`demo/odb-symbol-board.tgz ${symbolBoardTgz.length} bytes, ${Object.keys(symbolBoard.files).length} files`);
+const gallery = buildSymbolGalleryJobFiles({ root: "symbol_gallery" });
+const galleryTgz = writeTgz(gallery.files);
+writeFileSync(resolve(demoDir, "odb-symbol-gallery.tgz"), galleryTgz);
+console.log(`demo/odb-symbol-gallery.tgz ${galleryTgz.length} bytes, ${Object.keys(gallery.files).length} files`);
 
 /** Minimal deterministic ZIP writer (deflate, fixed DOS timestamp). */
 function writeZip(entries) {
