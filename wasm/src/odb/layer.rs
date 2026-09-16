@@ -170,9 +170,10 @@ impl Driver<'_> {
         Ok(())
     }
 
-    /// ODB++ rotates a pad clockwise first and mirrors second ("mirror in
-    /// x-axis" flips y). The flash transform applies mirroring before rotation
-    /// and rotates counter-clockwise, and `M · R(t) = R(-t) · M`, so a mirrored
+    /// ODB++ rotates a pad clockwise first and mirrors second; mirroring is
+    /// "along the x-axis (left to right, changing x coordinates)", i.e.
+    /// `x -> -x`. The flash transform applies mirroring before rotation and
+    /// rotates counter-clockwise, and `M · R(t) = R(-t) · M`, so a mirrored
     /// pad keeps the ODB angle while an unmirrored pad negates it.
     fn set_transform(&mut self, orient: Orient) {
         let rotation = if orient.mirror {
@@ -181,8 +182,8 @@ impl Driver<'_> {
             -orient.angle_deg
         };
         let state = &mut self.parser.current_state;
-        state.mirror_x = false;
-        state.mirror_y = orient.mirror;
+        state.mirror_x = orient.mirror;
+        state.mirror_y = false;
         state.layer_rotation = normalize_angle(rotation).to_radians();
     }
 
@@ -206,7 +207,7 @@ impl Driver<'_> {
             self.diagnostics.missing_symbol(&name);
             return Ok(());
         };
-        if let Shape::Unsupported { .. } = shape {
+        if let Shape::Unsupported = shape {
             self.diagnostics
                 .unknown_symbol(&context.features.symbol_name(pad.sym));
         }
@@ -280,9 +281,10 @@ impl Driver<'_> {
             self.diagnostics.missing_symbol(&name);
             return None;
         };
-        if let Shape::Unsupported { .. } = shape {
+        if let Shape::Unsupported = shape {
             self.diagnostics
                 .unknown_symbol(&context.features.symbol_name(sym));
+            return None;
         }
         if let Some(diameter) = solid_circle_diameter(&shape) {
             return Some((self.circle_code(diameter), true));
@@ -601,8 +603,9 @@ impl Driver<'_> {
 }
 
 /// The placement of a pad that references a user symbol. ODB++ rotates the
-/// symbol clockwise about its origin first, mirrors it about the x-axis
-/// second, and then moves it to the pad position.
+/// symbol clockwise about its origin first, then mirrors it "along the
+/// x-axis (left to right, changing x coordinates)", i.e. `x -> -x`, and then
+/// moves it to the pad position.
 pub(crate) struct Placement {
     x: f32,
     y: f32,
@@ -630,19 +633,21 @@ impl Placement {
     pub(crate) fn point(&self, px: f32, py: f32) -> (f32, f32) {
         let rx = px * self.cos + py * self.sin;
         let ry = -px * self.sin + py * self.cos;
-        (self.x + rx, self.y + if self.mirror { -ry } else { ry })
+        (self.x + if self.mirror { -rx } else { rx }, self.y + ry)
     }
 }
 
 /// Move one record of a user symbol into the coordinate system of the pad that
 /// flashes it. Polarity is relative to the pad, arc direction flips under
 /// mirroring, and nested pad orientations compose as
-/// `M^m · R(θ) · M^mi · R(θi) = M^(m⊕mi) · R(mi ? θi − θ : θi + θ)`.
+/// `M^m · R(θ) · M^mi · R(θi) = M^(m⊕mi) · R(mi ? θi − θ : θi + θ)`:
+/// moving the inner mirror `M^mi` past the outer rotation negates that
+/// rotation.
 pub(crate) fn place_record(record: &Record, placement: &Placement) -> Record {
     match record {
         Record::Pad(pad) => {
             let (x, y) = placement.point(pad.x, pad.y);
-            let angle = if placement.mirror {
+            let angle = if pad.orient.mirror {
                 pad.orient.angle_deg - placement.angle_deg
             } else {
                 pad.orient.angle_deg + placement.angle_deg

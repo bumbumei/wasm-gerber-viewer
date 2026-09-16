@@ -3,7 +3,7 @@ use super::features::Units;
 use super::features::{parse_features, parse_orient, Fields, Record};
 use super::layer::{place_record, Placement};
 use super::lzw::{decompress_unix_z, is_unix_z};
-use super::symbols::{parse_standard_symbol, shape_to_aperture, Shape, ThermalKind};
+use super::symbols::{parse_standard_symbol, shape_to_aperture, Corners, Shape, ThermalKind};
 use super::tools::parse_tools;
 use super::{is_odb_envelope, take_last_diagnostics};
 use crate::drill::{parse_drill_with_offset, parse_drill_with_offset_and_interactions};
@@ -161,13 +161,38 @@ fn standard_symbols_resolve_in_both_units() {
         parse_standard_symbol("hole1000x1x2x3", MICRONS),
         Some(Shape::Circle { .. })
     ));
+    // Angles and counts are dimensionless: they read the same in both units.
+    for scale in [MICRONS, MILS] {
+        assert!(matches!(
+            parse_standard_symbol("thr1600x1000x45x4x300", scale),
+            Some(Shape::Thermal {
+                spokes: 4,
+                angle_deg,
+                kind: ThermalKind::RoundRounded,
+                ..
+            }) if angle_deg == 45.0
+        ));
+    }
     assert!(matches!(
-        parse_standard_symbol("thr1600x1000x45x4x300", MICRONS),
+        parse_standard_symbol("s_ths2400x1400x30x4x300xr200x13", MICRONS),
         Some(Shape::Thermal {
-            spokes: 4,
-            kind: ThermalKind::RoundRounded,
+            kind: ThermalKind::Square,
+            r,
+            corners,
             ..
-        })
+        }) if (r - 0.2).abs() < 1e-5 && corners.has(1) && corners.has(3) && !corners.has(2)
+    ));
+    assert!(matches!(
+        parse_standard_symbol("rc_tho2800x1600x45x4x300x300", MICRONS),
+        Some(Shape::Thermal {
+            kind: ThermalKind::RectOpen,
+            lw,
+            ..
+        }) if (lw - 0.3).abs() < 1e-5
+    ));
+    assert!(matches!(
+        parse_standard_symbol("donut_rc2800x1600x400xr400x2", MICRONS),
+        Some(Shape::DonutRect { r, corners, .. }) if (r - 0.4).abs() < 1e-5 && corners.has(2) && !corners.has(1)
     ));
     assert!(matches!(
         parse_standard_symbol("moire10x5x3x2x60x45", MICRONS),
@@ -181,13 +206,20 @@ fn standard_symbols_resolve_in_both_units() {
         parse_standard_symbol("oval_h1000x500", MICRONS),
         Some(Shape::HalfOval { w, h }) if (w - 1.0).abs() < 1e-5 && (h - 0.5).abs() < 1e-5
     ));
-    assert!(
-        matches!(
-            parse_standard_symbol("o_ths1000x500x45x4x100x50", MICRONS),
-            Some(Shape::Unsupported { .. })
-        ),
-        "families without a shape still fall back"
+    assert!(matches!(
+        parse_standard_symbol("o_ths1000x500x45x4x100x50", MICRONS),
+        Some(Shape::Thermal {
+            kind: ThermalKind::Oval,
+            ..
+        })
+    ));
+    assert_eq!(
+        parse_standard_symbol("hplate2400x1200x400", MICRONS),
+        Some(Shape::Unsupported),
+        "standard families without geometry are recognised, reported and not drawn"
     );
+    assert!(super::symbols::is_empty_shape(&Shape::Unsupported));
+    assert!(shape_to_aperture(&Shape::Unsupported).primitives.is_empty());
     assert_eq!(parse_standard_symbol("CUSTOMD294", MICRONS), None);
     assert_eq!(parse_standard_symbol("silk_kiro", MICRONS), None);
     assert_eq!(parse_standard_symbol("construct+71", MICRONS), None);
@@ -201,23 +233,63 @@ fn standard_symbols_resolve_in_both_units() {
         w: 1.4,
         h: 0.8,
         r: 0.25,
-        corners: super::symbols::Corners::ALL,
+        corners: Corners::ALL,
     });
     assert!(!aperture.primitives.is_empty());
     assert_approx(aperture.width, 1.4);
-    let donut = shape_to_aperture(&Shape::DonutSquare { od: 1.2, id: 0.6 });
-    assert!(donut.has_negative, "square donuts clear their centre");
-    let thermal = shape_to_aperture(&Shape::Thermal {
-        od: 1.6,
-        id: 1.0,
-        angle_deg: 45.0,
-        spokes: 4,
-        gap: 0.3,
-        kind: ThermalKind::RoundRounded,
+    let donut = shape_to_aperture(&Shape::DonutSquare {
+        od: 1.2,
+        id: 0.6,
+        r: 0.0,
+        corners: Corners::ALL,
     });
+    assert!(!donut.primitives.is_empty());
+    assert!(
+        !donut.has_negative,
+        "rings are positive contours, not cut-outs"
+    );
+    let thermal = shape_to_aperture(&thermal(1.6, 1.0, 45.0, 4, 0.3, ThermalKind::RoundRounded));
     assert!(!thermal.primitives.is_empty());
     assert!(!thermal.has_negative, "thr is built from positive segments");
     assert_approx(thermal.width, 1.6);
+}
+
+/// An `od`/`id` thermal shape (square rings use `od` for both sides).
+fn thermal(od: f32, id: f32, angle_deg: f32, spokes: u32, gap: f32, kind: ThermalKind) -> Shape {
+    Shape::Thermal {
+        ow: od,
+        oh: od,
+        lw: (od - id) / 2.0,
+        angle_deg,
+        spokes,
+        gap,
+        kind,
+        r: 0.0,
+        corners: Corners::ALL,
+    }
+}
+
+/// A `w` x `h` thermal ring of width `lw`.
+fn rect_thermal(
+    w: f32,
+    h: f32,
+    lw: f32,
+    angle_deg: f32,
+    spokes: u32,
+    gap: f32,
+    kind: ThermalKind,
+) -> Shape {
+    Shape::Thermal {
+        ow: w,
+        oh: h,
+        lw,
+        angle_deg,
+        spokes,
+        gap,
+        kind,
+        r: 0.0,
+        corners: Corners::ALL,
+    }
 }
 
 fn covers(aperture: &crate::parser::Aperture, x: f32, y: f32) -> bool {
@@ -271,67 +343,141 @@ fn symbol_geometry_matches_reference_viewer() {
     assert!(!covers(&bfs, 0.9, 0.9));
     assert!(!covers(&bfs, -0.9, -0.9));
 
-    // Half oval: round end towards +x when wider than tall, apex at x = h.
+    // Half oval (specification picture): centred on its box, flat end at -x,
+    // semicircle of diameter h at +x.
     let wide = shape_to_aperture(&Shape::HalfOval { w: 3.0, h: 1.0 });
-    assert!(covers(&wide, -1.9, 0.0));
-    assert!(covers(&wide, 0.95, 0.0));
-    assert!(!covers(&wide, 1.05, 0.0));
-    assert!(!covers(&wide, 0.9, 0.45));
-    assert!(covers(&wide, -1.0, 0.45));
+    assert!(covers(&wide, -1.45, 0.0), "flat end reaches -w/2");
+    assert!(covers(&wide, 1.45, 0.0), "apex reaches +w/2");
+    assert!(!covers(&wide, 1.55, 0.0));
+    assert!(!covers(&wide, 1.45, 0.4), "round end");
+    assert!(covers(&wide, -1.45, 0.45), "square corners at the flat end");
+    assert!(covers(&wide, 0.9, 0.45), "straight part ends at w/2 - h/2");
+    // Taller than wide: the right half of a 2w x h oval (corners of radius w at +x).
     let tall = shape_to_aperture(&Shape::HalfOval { w: 1.0, h: 3.0 });
-    assert!(covers(&tall, 0.0, -1.9));
-    assert!(covers(&tall, 0.0, 0.95));
-    assert!(!covers(&tall, 0.0, 1.05));
+    assert!(covers(&tall, -0.45, -1.45), "the -x side reaches -h/2");
+    assert!(!covers(&tall, 0.3, -1.45), "the bottom is the oval end");
+    assert!(covers(&tall, 0.45, 0.0), "straight +x edge");
+    assert!(!covers(&tall, 0.45, 1.45), "+x corners are rounded");
+    assert!(covers(&tall, -0.45, 1.45), "-x corners are square");
 
     // Thermal rings are open at the spoke angles and solid between them.
-    let thr = shape_to_aperture(&Shape::Thermal {
-        od: 2.0,
-        id: 1.0,
-        angle_deg: 0.0,
-        spokes: 4,
-        gap: 0.2,
-        kind: ThermalKind::RoundRounded,
-    });
+    let (c45, s45) = (45f32.to_radians().cos(), 45f32.to_radians().sin());
+    let thr = shape_to_aperture(&thermal(2.0, 1.0, 0.0, 4, 0.2, ThermalKind::RoundRounded));
     assert!(!covers(&thr, 0.75, 0.0), "gap centred on 0 degrees");
     assert!(!covers(&thr, 0.0, 0.75), "gap centred on 90 degrees");
-    let (c45, s45) = (45f32.to_radians().cos(), 45f32.to_radians().sin());
     assert!(covers(&thr, 0.75 * c45, 0.75 * s45), "solid at 45 degrees");
     assert!(!covers(&thr, 0.0, 0.0), "centre is open");
-    let ths = shape_to_aperture(&Shape::Thermal {
-        od: 2.0,
-        id: 1.0,
-        angle_deg: 45.0,
-        spokes: 4,
-        gap: 0.2,
-        kind: ThermalKind::RoundSquared,
-    });
+    let ths = shape_to_aperture(&thermal(2.0, 1.0, 45.0, 4, 0.2, ThermalKind::RoundSquared));
     assert!(
         !covers(&ths, 0.75 * c45, 0.75 * s45),
         "gap centred on 45 degrees"
     );
     assert!(covers(&ths, 0.75, 0.0), "solid at 0 degrees");
-    let s_ths = shape_to_aperture(&Shape::Thermal {
-        od: 2.0,
-        id: 1.0,
-        angle_deg: 0.0,
-        spokes: 4,
-        gap: 0.2,
-        kind: ThermalKind::Square,
-    });
+    assert!(!covers(&ths, 0.0, 0.0));
+    assert!(!ths.has_negative);
+    // A gap wider than the opening: the centre stays open and the pieces end
+    // where the gap edges meet.
+    let wide_gap = shape_to_aperture(&thermal(2.0, 0.6, 0.0, 4, 0.8, ThermalKind::RoundSquared));
+    assert!(!covers(&wide_gap, 0.0, 0.0), "centre stays open");
+    assert!(!covers(&wide_gap, 0.2, 0.2), "inside the gap band");
+    assert!(
+        covers(&wide_gap, 0.55, 0.55),
+        "piece starts where the gap edges meet"
+    );
+    assert!(!covers(&wide_gap, 0.9, 0.1));
+    let s_ths = shape_to_aperture(&thermal(2.0, 1.0, 0.0, 4, 0.2, ThermalKind::Square));
     assert!(covers(&s_ths, 0.9, 0.9), "square ring reaches its corner");
     assert!(!covers(&s_ths, 0.75, 0.0), "gap centred on 0 degrees");
     assert!(!covers(&s_ths, 0.0, 0.0), "square centre is open");
-    let rc_ths = shape_to_aperture(&Shape::RectThermal {
-        w: 4.0,
-        h: 2.0,
-        angle_deg: 45.0,
-        spokes: 4,
-        gap: 0.2,
-        air_gap: 0.3,
-    });
+    assert!(!s_ths.has_negative, "gaps are not negative primitives");
+    let sr_ths = shape_to_aperture(&thermal(2.0, 1.0, 45.0, 4, 0.2, ThermalKind::SquareRound));
+    assert!(covers(&sr_ths, 0.9, 0.0), "square outside");
+    assert!(!covers(&sr_ths, 0.45, 0.0), "round inside");
+    assert!(covers(&sr_ths, 0.55, 0.0), "ring between circle and square");
+    assert!(
+        !covers(&sr_ths, 0.7 * c45, -0.7 * s45),
+        "gap at 315 degrees"
+    );
+    assert!(!covers(&sr_ths, 0.9, 0.9), "gap at the corner");
+    let rc_ths = shape_to_aperture(&rect_thermal(
+        4.0,
+        2.0,
+        0.3,
+        45.0,
+        4,
+        0.2,
+        ThermalKind::Rect,
+    ));
     assert!(covers(&rc_ths, 0.0, 0.85), "long side is solid");
     assert!(!covers(&rc_ths, 1.85, 0.85), "diagonal gap cuts the corner");
     assert!(!covers(&rc_ths, 0.0, 0.0));
+    assert!(!rc_ths.has_negative);
+    // Open corners: only bars remain, cut square where the gap meets the inner edge.
+    let s_tho = shape_to_aperture(&thermal(2.4, 1.4, 45.0, 4, 0.3, ThermalKind::SquareOpen));
+    assert!(covers(&s_tho, 0.0, 0.95), "top bar");
+    assert!(covers(&s_tho, 0.4, 0.95));
+    assert!(!covers(&s_tho, 0.6, 0.95), "bar ends before the corner");
+    assert!(!covers(&s_tho, 0.95, 0.95), "corner is open");
+    assert!(!covers(&s_tho, 0.0, 0.0));
+    let s_tho0 = shape_to_aperture(&thermal(2.4, 1.4, 0.0, 4, 0.3, ThermalKind::SquareOpen));
+    assert!(
+        !covers(&s_tho0, 0.0, 0.95),
+        "gap splits the bar in the middle"
+    );
+    assert!(covers(&s_tho0, 0.4, 0.95));
+    assert!(!covers(&s_tho0, 0.95, 0.95), "corner is still open");
+    let rc_tho = shape_to_aperture(&rect_thermal(
+        2.8,
+        1.6,
+        0.3,
+        45.0,
+        4,
+        0.3,
+        ThermalKind::RectOpen,
+    ));
+    assert!(covers(&rc_tho, 0.0, 0.65));
+    assert!(
+        covers(&rc_tho, 0.6, 0.65),
+        "long bar reaches past the short bar's end"
+    );
+    assert!(!covers(&rc_tho, 1.25, 0.65), "corner is open");
+    assert!(covers(&rc_tho, 1.25, 0.0), "short bar");
+    assert!(
+        !covers(&rc_tho, 1.25, 0.45),
+        "short bar ends where the gap meets its inner edge"
+    );
+    let o_ths = shape_to_aperture(&rect_thermal(2.8, 1.6, 0.3, 0.0, 4, 0.3, ThermalKind::Oval));
+    assert!(covers(&o_ths, 0.3, 0.65), "straight part of the oval ring");
+    assert!(!covers(&o_ths, 0.0, 0.65), "gap at 90 degrees");
+    assert!(!covers(&o_ths, 1.25, 0.0), "gap at 0 degrees");
+    assert!(covers(&o_ths, 1.2, 0.5), "round end of the ring");
+    assert!(!covers(&o_ths, 0.0, 0.0));
+    assert!(!covers(&o_ths, 0.0, 0.3), "inner oval is open");
+
+    // Rounded donuts: the outer corners use the radius, the inner ones the
+    // radius minus the ring width.
+    let donut = shape_to_aperture(&Shape::DonutSquare {
+        od: 2.4,
+        id: 1.2,
+        r: 0.4,
+        corners: Corners::ALL,
+    });
+    assert!(covers(&donut, 1.15, 0.0));
+    assert!(!covers(&donut, 1.15, 1.15), "outer corner rounded");
+    assert!(covers(&donut, 0.95, 0.95));
+    assert!(!covers(&donut, 0.5, 0.5), "inside the opening");
+    assert!(!donut.has_negative);
+    let donut_rc = shape_to_aperture(&Shape::DonutRect {
+        ow: 2.8,
+        oh: 1.6,
+        lw: 0.4,
+        r: 0.4,
+        corners: Corners::parse("2"),
+    });
+    assert!(!covers(&donut_rc, -1.35, 0.75), "top-left corner rounded");
+    assert!(covers(&donut_rc, 1.35, 0.75), "top-right corner square");
+    assert!(covers(&donut_rc, -1.35, -0.75));
+    assert!(!covers(&donut_rc, 0.0, 0.0));
 
     // Moire: dot, then rings separated by the gap, from the centre outwards.
     let moire = shape_to_aperture(&Shape::Moire {
@@ -405,6 +551,33 @@ fn pads_flash_with_odb_orientation() {
     let (_, max_x, min_y, _) = layer_bounds(&payload.render_layers);
     assert!(max_x > 1.6, "bar reaches right");
     assert!(min_y < -0.9, "right end is rotated clockwise (downwards)");
+
+    // Mirroring is "along the x-axis (left to right, changing x coordinates)"
+    // and happens after the rotation: a 2 x 2 triangle at `9 30` lands where
+    // M_x · R_cw(30°) puts its vertices.
+    let text = envelope(
+        "signal",
+        "UNITS=MM\n$0 tri2000x2000\nP 0 0 0 P 0 9 30\n",
+        &[],
+    );
+    let layers = parse_gerber_with_options(&text, true, 1).unwrap();
+    let (min_x, max_x, min_y, max_y) = layer_bounds(&layers);
+    let (c, s) = (30f32.to_radians().cos(), 30f32.to_radians().sin());
+    let expected: Vec<[f32; 2]> = [[-1.0f32, -1.0], [1.0, -1.0], [0.0, 1.0]]
+        .iter()
+        .map(|[x, y]| [-(x * c + y * s), -x * s + y * c])
+        .collect();
+    let bound =
+        |axis: usize, max: bool| {
+            expected.iter().map(|p| p[axis]).fold(
+                if max { f32::MIN } else { f32::MAX },
+                |acc, v| if max { acc.max(v) } else { acc.min(v) },
+            )
+        };
+    assert_approx(min_x, bound(0, false));
+    assert_approx(max_x, bound(0, true));
+    assert_approx(min_y, bound(1, false));
+    assert_approx(max_y, bound(1, true));
 }
 
 #[test]
@@ -622,9 +795,36 @@ fn placement_composes_orientation_and_mirrors_arcs() {
     let Record::Pad(placed) = place_record(&Record::Pad(pad.clone()), &placement) else {
         panic!()
     };
-    assert_approx(placed.orient.angle_deg, 300.0);
+    // The inner pad is not mirrored, so the outer rotation adds: 30 + 90.
+    assert_approx(placed.orient.angle_deg, 120.0);
     assert!(placed.orient.mirror);
     assert!(placed.neg);
+    // (1, 0) rotated 90 degrees clockwise is (0, -1); mirroring x keeps it.
+    assert_approx(placed.x, 0.0);
+    assert_approx(placed.y, -1.0);
+
+    // Mirror only: x changes sign, y does not.
+    let mirror_only = parse_features("UNITS=MM\n$0 x\nP 0 0 0 P 0 4\n");
+    let Record::Pad(outer) = &mirror_only.records[0] else {
+        panic!()
+    };
+    let Record::Pad(flipped) = place_record(&Record::Pad(pad.clone()), &Placement::new(outer))
+    else {
+        panic!()
+    };
+    assert_approx(flipped.x, -1.0);
+    assert_approx(flipped.y, 0.0);
+    // A mirrored inner pad inside a mirrored outer pad: the mirrors cancel and
+    // the outer rotation is subtracted.
+    let inner_mirrored = parse_features("UNITS=MM\n$0 x\nP 0 0 0 P 0 9 30\n");
+    let Record::Pad(inner) = &inner_mirrored.records[0] else {
+        panic!()
+    };
+    let Record::Pad(composed) = place_record(&Record::Pad(inner.clone()), &placement) else {
+        panic!()
+    };
+    assert!(!composed.orient.mirror);
+    assert_approx(composed.orient.angle_deg, 300.0);
     let Record::Arc(placed_arc) = place_record(&Record::Arc(arc.clone()), &placement) else {
         panic!()
     };

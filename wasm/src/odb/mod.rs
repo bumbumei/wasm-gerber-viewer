@@ -128,7 +128,7 @@ impl Diagnostics {
         }
         if !self.unknown_symbols.is_empty() {
             notes.push(format!(
-                "unknown symbols approximated as circles ({})",
+                "standard symbols without geometry here, not drawn ({})",
                 list_names(&self.unknown_symbols)
             ));
         }

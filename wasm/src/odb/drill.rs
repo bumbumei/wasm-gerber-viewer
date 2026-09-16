@@ -57,7 +57,7 @@ pub(crate) fn drive(parser: &mut DrillParser, envelope: &Envelope) -> Result<(),
             diagnostics.missing_symbol(&features.symbol_name(sym));
             continue;
         };
-        if let super::symbols::Shape::Unsupported { .. } = shape {
+        if let super::symbols::Shape::Unsupported = shape {
             diagnostics.unknown_symbol(&features.symbol_name(sym));
         }
         let diameter = solid_circle_diameter(shape).unwrap_or_else(|| pen_diameter(shape));
