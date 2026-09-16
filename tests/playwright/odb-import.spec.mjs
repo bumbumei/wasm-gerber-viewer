@@ -4,6 +4,7 @@ import { expect, test } from "@playwright/test";
 
 const sampleTgz = fileURLToPath(new URL("../../demo/odb-sample.tgz", import.meta.url));
 const sampleZip = fileURLToPath(new URL("../../demo/odb-sample.zip", import.meta.url));
+const symbolBoardTgz = fileURLToPath(new URL("../../demo/odb-symbol-board.tgz", import.meta.url));
 
 const EXPECTED_GERBER_LAYERS = [
   "profile.gko",
@@ -16,12 +17,10 @@ const EXPECTED_GERBER_LAYERS = [
 ];
 const EXPECTED_DRILL_LAYERS = ["drill-pth.drl", "drill-npth.drl", "rout-npth.drl"];
 
-async function uploadAndWait(page, file) {
+async function uploadAndWait(page, file, layerCount = EXPECTED_GERBER_LAYERS.length + EXPECTED_DRILL_LAYERS.length) {
   await page.locator("#file-input").setInputFiles(file);
   await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
-  await expect(page.locator("#visible-layer-count")).toHaveText(
-    `${EXPECTED_GERBER_LAYERS.length + EXPECTED_DRILL_LAYERS.length} / ${EXPECTED_GERBER_LAYERS.length + EXPECTED_DRILL_LAYERS.length}`,
-  );
+  await expect(page.locator("#visible-layer-count")).toHaveText(`${layerCount} / ${layerCount}`);
 }
 
 async function layerNames(page, selector) {
@@ -89,6 +88,31 @@ test("the same job inside a .zip loads identically, and surfaces keep holes in a
   await approximate.check({ force: true });
   await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
   await expect(page.locator("#bounds-readout")).toHaveText(exactBounds);
+});
+
+test("the symbol board demo renders every standard symbol family without diagnostics", async ({ page }) => {
+  await page.goto("/");
+  await uploadAndWait(page, symbolBoardTgz, 8);
+
+  expect(await layerNames(page, ".gerber-layer-item")).toEqual([
+    "profile.gko",
+    "sst.gto",
+    "smt.gts",
+    "top.gtl",
+    "bottom.gbl",
+    "smb.gbs",
+  ]);
+  expect(await layerNames(page, ".drill-layer-item")).toEqual(["drill-pth.drl", "drill-npth.drl"]);
+  await expect(page.locator("#bounds-readout")).toHaveText("60.100 x 40.100 mm");
+  // Every layer stays inside the 60 x 40 profile.
+  await expect(page.locator(".gerber-layer-item", { hasText: "top.gtl" })).toContainText("58.000 x 38.000 mm");
+  await expect(page.locator(".drill-layer-item", { hasText: "drill-pth.drl" })).toContainText("1 slots");
+
+  const diagnostics = page.locator("[data-panel='diagnostics']");
+  await page.locator("[data-panel-tab='diagnostics']").click();
+  await expect(diagnostics).not.toContainText("warning");
+  await expect(diagnostics).not.toContainText("danger");
+  await expect(diagnostics).not.toContainText("error");
 });
 
 test("plain Gerber archives still load through the ordinary path", async ({ page }) => {
