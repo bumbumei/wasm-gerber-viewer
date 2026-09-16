@@ -213,19 +213,50 @@ fn standard_symbols_resolve_in_both_units() {
             ..
         })
     ));
-    assert_eq!(
+    assert!(matches!(
         parse_standard_symbol("hplate2400x1200x400", MICRONS),
-        Some(Shape::Unsupported),
-        "standard families without geometry are recognised, reported and not drawn"
-    );
-    // Stencil symbols and oblong thermals end in a bare `r`/`s` style flag.
-    for name in [
-        "dogbone2400x1600x400x400x50xr",
-        "cross2400x2400x400x400x50x50xs",
-        "oblong_ths2800x1600x0x4x300x300xr",
-        "dpack2400x2400x200x200x2x2",
-        "null1",
-    ] {
+        Some(Shape::HomePlate { .. })
+    ));
+    // Stencil symbols and oblong thermals end in a bare `r`/`s` style flag,
+    // optionally followed by a corner radius.
+    assert!(matches!(
+        parse_standard_symbol("dogbone2400x1600x400x400x50xr", MICRONS),
+        Some(Shape::Dogbone { round: true, ra, .. }) if ra == 0.0
+    ));
+    assert!(matches!(
+        parse_standard_symbol("cross2400x2400x400x400x50x50xs20", MICRONS),
+        Some(Shape::Cross { round: false, ra, .. }) if (ra - 0.02).abs() < 1e-6
+    ));
+    assert!(matches!(
+        parse_standard_symbol("dogbone2400x1600x400x400x50xrx20", MICRONS),
+        Some(Shape::Dogbone { round: true, ra, .. }) if (ra - 0.02).abs() < 1e-6
+    ));
+    assert!(matches!(
+        parse_standard_symbol("oblong_ths2800x1600x0x4x300x300xr", MICRONS),
+        Some(Shape::Thermal {
+            kind: ThermalKind::Oval,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_standard_symbol("oblong_ths2800x1600x45x4x300x300xs", MICRONS),
+        Some(Shape::Thermal {
+            kind: ThermalKind::Rect,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_standard_symbol("dpack2400x2400x200x200x3x2x100", MICRONS),
+        Some(Shape::DPack { columns: 3, rows: 2, ra, .. }) if (ra - 0.1).abs() < 1e-6
+    ));
+    assert!(matches!(
+        parse_standard_symbol("s_thr2400x1600x45x4x400", MICRONS),
+        Some(Shape::Thermal {
+            kind: ThermalKind::LineThermal,
+            ..
+        })
+    ));
+    for name in ["null1", "fhplate2400x1600x400x800"] {
         assert_eq!(
             parse_standard_symbol(name, MICRONS),
             Some(Shape::Unsupported),
@@ -521,6 +552,107 @@ fn symbol_geometry_matches_reference_viewer() {
     assert!(covers(&donut_rc, 1.35, 0.75), "top-right corner square");
     assert!(covers(&donut_rc, -1.35, -0.75));
     assert!(!covers(&donut_rc, 0.0, 0.0));
+
+    // Stencil symbols (official viewer pictures): home plate points +x,
+    // the inverted one is notched at +x, radhplate has a round bite,
+    // dshape a round +x end.
+    let hplate = shape_to_aperture(&Shape::HomePlate {
+        w: 2.4,
+        h: 1.6,
+        c: 0.8,
+        ra: 0.0,
+        ro: 0.0,
+    });
+    assert!(covers(&hplate, 1.15, 0.0), "tip");
+    assert!(!covers(&hplate, 1.15, 0.7), "cut corner");
+    assert!(covers(&hplate, 0.3, 0.7));
+    let rhplate = shape_to_aperture(&Shape::InvertedHomePlate {
+        w: 2.4,
+        h: 1.6,
+        c: 0.8,
+        ra: 0.0,
+        ro: 0.0,
+    });
+    assert!(!covers(&rhplate, 1.1, 0.0), "notch");
+    assert!(
+        covers(&rhplate, 1.0, 0.75),
+        "acute corner above the notch edge"
+    );
+    assert!(covers(&rhplate, -1.1, 0.0));
+    let radhplate = shape_to_aperture(&Shape::RadiusedInvertedHomePlate {
+        w: 2.4,
+        h: 1.6,
+        ms: 1.2,
+        ra: 0.0,
+    });
+    assert!(
+        !covers(&radhplate, 0.9, 0.0),
+        "bite of radius 0.6 at the +x edge"
+    );
+    assert!(covers(&radhplate, 1.15, 0.7));
+    assert!(covers(&radhplate, 0.5, 0.0));
+    let dshape = shape_to_aperture(&Shape::RadiusedHomePlate {
+        w: 2.4,
+        h: 1.6,
+        r: 0.8,
+        ra: 0.0,
+    });
+    assert!(covers(&dshape, 1.15, 0.0), "apex of the round end");
+    assert!(!covers(&dshape, 1.15, 0.75), "round end");
+    assert!(covers(&dshape, 0.3, 0.75));
+    let cross = |round: bool| {
+        shape_to_aperture(&Shape::Cross {
+            w: 2.4,
+            h: 2.4,
+            hs: 0.4,
+            vs: 0.4,
+            hc: 50.0,
+            vc: 50.0,
+            round,
+            ra: 0.0,
+        })
+    };
+    assert!(covers(&cross(false), 1.1, 0.0));
+    assert!(covers(&cross(false), 0.0, 1.1));
+    assert!(!covers(&cross(false), 0.9, 0.9));
+    assert!(
+        covers(&cross(false), 1.19, 0.19),
+        "square end fills the corner"
+    );
+    assert!(!covers(&cross(true), 1.19, 0.19), "round end");
+    let dogbone = |round: bool| {
+        shape_to_aperture(&Shape::Dogbone {
+            w: 2.4,
+            h: 1.6,
+            hs: 0.4,
+            vs: 0.4,
+            hc: 50.0,
+            round,
+            ra: 0.0,
+        })
+    };
+    assert!(covers(&dogbone(false), 1.1, 0.6), "top bar");
+    assert!(covers(&dogbone(false), 0.0, 0.0), "connector");
+    assert!(!covers(&dogbone(false), 0.9, 0.0), "between the bars");
+    assert!(covers(&dogbone(false), 1.19, 0.79));
+    assert!(!covers(&dogbone(true), 1.19, 0.79), "round bar ends");
+    let dpack = shape_to_aperture(&Shape::DPack {
+        w: 2.4,
+        h: 2.4,
+        hg: 0.2,
+        vg: 0.2,
+        columns: 2,
+        rows: 2,
+        ra: 0.0,
+    });
+    assert!(covers(&dpack, -0.65, -0.65), "pad centre");
+    assert!(!covers(&dpack, 0.0, 0.0), "gap");
+    assert!(!covers(&dpack, 0.05, -0.65));
+    let s_thr = shape_to_aperture(&thermal(2.4, 1.6, 45.0, 4, 0.4, ThermalKind::LineThermal));
+    assert!(covers(&s_thr, 0.0, 1.0), "bar");
+    assert!(!covers(&s_thr, 0.0, 0.0));
+    assert!(!covers(&s_thr, 1.0, 1.0), "open corner");
+    assert!(!s_thr.has_negative);
 
     // Moire: dot, then rings separated by the gap, from the centre outwards.
     let moire = shape_to_aperture(&Shape::Moire {

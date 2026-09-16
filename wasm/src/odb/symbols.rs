@@ -110,8 +110,10 @@ pub(crate) enum ThermalKind {
     Rect,
     /// `rc_tho`: rectangular ring with open corners.
     RectOpen,
-    /// `o_ths`: oval ring cut by the gaps.
+    /// `o_ths` and `oblong_ths...xr`: oval ring cut by the gaps.
     Oval,
+    /// `s_thr`: like `SquareOpen` but the bars have rounded ends.
+    LineThermal,
 }
 
 /// A standard symbol in millimetres.
@@ -232,6 +234,75 @@ pub(crate) enum Shape {
     ButterflySquare {
         s: f32,
     },
+    /// `hplate<w>x<h>x<c>[x<ra>x<ro>]`: a rectangle whose +x end is a point
+    /// (cut `c` deep); `ra` rounds the acute tip, `ro` the two obtuse corners.
+    HomePlate {
+        w: f32,
+        h: f32,
+        c: f32,
+        ra: f32,
+        ro: f32,
+    },
+    /// `rhplate<w>x<h>x<c>[x<ra>x<ro>]`: a rectangle with a triangular notch
+    /// (`c` deep) in its +x end; `ra` rounds the acute corners, `ro` the notch.
+    InvertedHomePlate {
+        w: f32,
+        h: f32,
+        c: f32,
+        ra: f32,
+        ro: f32,
+    },
+    /// `radhplate<w>x<h>x<ms>[x<ra>]`: a rectangle with a semicircular bite of
+    /// diameter `ms` in its +x end.
+    RadiusedInvertedHomePlate {
+        w: f32,
+        h: f32,
+        ms: f32,
+        ra: f32,
+    },
+    /// `dshape<w>x<h>x<r>[x<ra>]`: a rectangle whose +x end is a circular arc
+    /// bulging `r` past the straight part.
+    RadiusedHomePlate {
+        w: f32,
+        h: f32,
+        r: f32,
+        ra: f32,
+    },
+    /// `cross<w>x<h>x<hs>x<vs>x<hc>x<vc>x<r|s>[<ra>]`: a horizontal bar of
+    /// thickness `hs` and a vertical bar of thickness `vs` crossing at
+    /// (`hc` %, `vc` %) of the box; round or square ends, inside corners `ra`.
+    Cross {
+        w: f32,
+        h: f32,
+        hs: f32,
+        vs: f32,
+        hc: f32,
+        vc: f32,
+        round: bool,
+        ra: f32,
+    },
+    /// `dogbone<w>x<h>x<hs>x<vs>x<hc>x<r|s>[x<ra>]`: two horizontal bars of
+    /// thickness `hs` joined by a vertical bar of width `vs` at `hc` %.
+    Dogbone {
+        w: f32,
+        h: f32,
+        hs: f32,
+        vs: f32,
+        hc: f32,
+        round: bool,
+        ra: f32,
+    },
+    /// `dpack<w>x<h>x<hg>x<vg>x<hn>x<vn>[x<ra>]`: `hn` columns by `vn` rows of
+    /// pads separated by gaps `hg` / `vg`, corners rounded with `ra`.
+    DPack {
+        w: f32,
+        h: f32,
+        hg: f32,
+        vg: f32,
+        columns: u32,
+        rows: u32,
+        ra: f32,
+    },
     /// A standard family (or parameter form) without a geometry here. It is
     /// reported and draws nothing rather than being approximated.
     Unsupported,
@@ -241,7 +312,7 @@ pub(crate) enum Shape {
 /// standard symbol (i.e. a user-defined symbol).
 ///
 /// A name is only standard when it matches the whole standard grammar:
-/// `<family><number>(x([rc]?<number>|r|s))*` (a bare `r` or `s` is the
+/// `<family><number>(x([rcs]?<number>|r|s))*` (a bare `r` or `s` is the
 /// round/square style flag of `dogbone`, `cross` and `oblong_ths`), or
 /// `hole<number>(x<token>)*` for holes. Anything else (`r10_tp`,
 /// `rect_custom`, `s1_via`) is a user-defined symbol that lives in
@@ -293,19 +364,17 @@ pub(crate) fn parse_standard_symbol(raw_name: &str, scale: f32) -> Option<Shape>
                     _ => return None,
                 }
             }
-        } else if (part.starts_with('r') || part.starts_with('c'))
+        } else if (part.starts_with('r') || part.starts_with('c') || part.starts_with('s'))
             && part[1..]
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || byte == b'.')
-            && part.len() > 1
         {
+            // `r<size>` / `c<size>` corner flags, or the round/square style
+            // flag of stencil symbols and oblong thermals (`dogbone...xr`,
+            // `cross...xs20`, `oblong_ths...xr`); a following number is the
+            // corner radius.
             let size = part[1..].parse::<f32>().unwrap_or(0.0);
             flags.push((part.as_bytes()[0], size, String::new()));
-        } else if part == "r" || part == "s" {
-            // Round/square style of stencil symbols and oblong thermals
-            // (`dogbone...xr`, `cross...xs`, `oblong_ths...xr`); a following
-            // number is the corner radius.
-            flags.push((b's', 0.0, String::new()));
         } else {
             // Not the standard grammar: a user-defined symbol whose name
             // happens to start like a standard family.
@@ -319,6 +388,19 @@ pub(crate) fn parse_standard_symbol(raw_name: &str, scale: f32) -> Option<Shape>
     let rounding = || match flags.first() {
         Some((b'r', size, value)) => (size * scale, Corners::parse(value)),
         _ => (0.0, Corners::ALL),
+    };
+    // Round (`r`) or square (`s`) style of stencil symbols, with the optional
+    // corner radius that follows it (`xr20` or `xrx20`).
+    let style = || match flags.first() {
+        Some((letter @ (b'r' | b's'), size, digits)) => Some((
+            *letter == b'r',
+            if *size > 0.0 {
+                size * scale
+            } else {
+                digits.parse::<f32>().unwrap_or(0.0) * scale
+            },
+        )),
+        _ => None,
     };
     let thermal = |kind: ThermalKind, ow: f32, oh: f32, lw: f32, first: usize| match (
         num(first),
@@ -444,13 +526,14 @@ pub(crate) fn parse_standard_symbol(raw_name: &str, scale: f32) -> Option<Shape>
             _ => Shape::Unsupported,
         },
         // <od>x<id>x<angle>x<spokes>x<gap>
-        "thr" | "ths" | "s_ths" | "s_tho" | "sr_ths" => match (len(0), len(1)) {
+        "thr" | "ths" | "s_ths" | "s_tho" | "s_thr" | "sr_ths" => match (len(0), len(1)) {
             (Some(od), Some(id)) => thermal(
                 match prefix {
                     "thr" => ThermalKind::RoundRounded,
                     "ths" => ThermalKind::RoundSquared,
                     "s_ths" => ThermalKind::Square,
                     "s_tho" => ThermalKind::SquareOpen,
+                    "s_thr" => ThermalKind::LineThermal,
                     _ => ThermalKind::SquareRound,
                 },
                 od,
@@ -473,6 +556,90 @@ pub(crate) fn parse_standard_symbol(raw_name: &str, scale: f32) -> Option<Shape>
                 lw,
                 2,
             ),
+            _ => Shape::Unsupported,
+        },
+        // <ow>x<oh>x<angle>x<spokes>x<gap>x<lw>x<r|s>: an oval ring (r) or a
+        // rectangular ring (s) cut by the gaps.
+        "oblong_ths" => match (len(0), len(1), len(5), style()) {
+            (Some(w), Some(h), Some(lw), Some((round, _))) => thermal(
+                if round {
+                    ThermalKind::Oval
+                } else {
+                    ThermalKind::Rect
+                },
+                w,
+                h,
+                lw,
+                2,
+            ),
+            _ => Shape::Unsupported,
+        },
+        "hplate" | "rhplate" => match (len(0), len(1), len(2)) {
+            (Some(w), Some(h), Some(c)) => {
+                let (ra, ro) = (len(3).unwrap_or(0.0), len(4).unwrap_or(0.0));
+                if prefix == "hplate" {
+                    Shape::HomePlate { w, h, c, ra, ro }
+                } else {
+                    Shape::InvertedHomePlate { w, h, c, ra, ro }
+                }
+            }
+            _ => Shape::Unsupported,
+        },
+        "radhplate" => match (len(0), len(1), len(2)) {
+            (Some(w), Some(h), Some(ms)) => Shape::RadiusedInvertedHomePlate {
+                w,
+                h,
+                ms,
+                ra: len(3).unwrap_or(0.0),
+            },
+            _ => Shape::Unsupported,
+        },
+        "dshape" => match (len(0), len(1), len(2)) {
+            (Some(w), Some(h), Some(r)) => Shape::RadiusedHomePlate {
+                w,
+                h,
+                r,
+                ra: len(3).unwrap_or(0.0),
+            },
+            _ => Shape::Unsupported,
+        },
+        "cross" => match (len(0), len(1), len(2), len(3), num(4), num(5), style()) {
+            (Some(w), Some(h), Some(hs), Some(vs), Some(hc), Some(vc), Some((round, ra))) => {
+                Shape::Cross {
+                    w,
+                    h,
+                    hs,
+                    vs,
+                    hc,
+                    vc,
+                    round,
+                    ra,
+                }
+            }
+            _ => Shape::Unsupported,
+        },
+        "dogbone" => match (len(0), len(1), len(2), len(3), num(4), style()) {
+            (Some(w), Some(h), Some(hs), Some(vs), Some(hc), Some((round, ra))) => Shape::Dogbone {
+                w,
+                h,
+                hs,
+                vs,
+                hc,
+                round,
+                ra,
+            },
+            _ => Shape::Unsupported,
+        },
+        "dpack" => match (len(0), len(1), len(2), len(3), count(4), count(5)) {
+            (Some(w), Some(h), Some(hg), Some(vg), Some(columns), Some(rows)) => Shape::DPack {
+                w,
+                h,
+                hg,
+                vg,
+                columns,
+                rows,
+                ra: len(6).unwrap_or(0.0),
+            },
             _ => Shape::Unsupported,
         },
         "el" => match (len(0), len(1)) {
@@ -610,6 +777,85 @@ pub(crate) fn resize_shape(shape: &Shape, delta: f32) -> Shape {
         },
         Shape::ButterflyRound { d } => Shape::ButterflyRound { d: grow(d) },
         Shape::ButterflySquare { s } => Shape::ButterflySquare { s: grow(s) },
+        Shape::HomePlate { w, h, c, ra, ro } => Shape::HomePlate {
+            w: grow(w),
+            h: grow(h),
+            c,
+            ra,
+            ro,
+        },
+        Shape::InvertedHomePlate { w, h, c, ra, ro } => Shape::InvertedHomePlate {
+            w: grow(w),
+            h: grow(h),
+            c,
+            ra,
+            ro,
+        },
+        Shape::RadiusedInvertedHomePlate { w, h, ms, ra } => Shape::RadiusedInvertedHomePlate {
+            w: grow(w),
+            h: grow(h),
+            ms,
+            ra,
+        },
+        Shape::RadiusedHomePlate { w, h, r, ra } => Shape::RadiusedHomePlate {
+            w: grow(w),
+            h: grow(h),
+            r,
+            ra,
+        },
+        Shape::Cross {
+            w,
+            h,
+            hs,
+            vs,
+            hc,
+            vc,
+            round,
+            ra,
+        } => Shape::Cross {
+            w: grow(w),
+            h: grow(h),
+            hs,
+            vs,
+            hc,
+            vc,
+            round,
+            ra,
+        },
+        Shape::Dogbone {
+            w,
+            h,
+            hs,
+            vs,
+            hc,
+            round,
+            ra,
+        } => Shape::Dogbone {
+            w: grow(w),
+            h: grow(h),
+            hs,
+            vs,
+            hc,
+            round,
+            ra,
+        },
+        Shape::DPack {
+            w,
+            h,
+            hg,
+            vg,
+            columns,
+            rows,
+            ra,
+        } => Shape::DPack {
+            w: grow(w),
+            h: grow(h),
+            hg,
+            vg,
+            columns,
+            rows,
+            ra,
+        },
         Shape::Unsupported => Shape::Unsupported,
     }
 }
@@ -644,6 +890,13 @@ pub(crate) fn pen_diameter(shape: &Shape) -> f32 {
         Shape::Thermal { ow, oh, .. } => ow.min(*oh),
         Shape::ButterflyRound { d } => *d,
         Shape::ButterflySquare { s } => *s,
+        Shape::HomePlate { w, h, .. }
+        | Shape::InvertedHomePlate { w, h, .. }
+        | Shape::RadiusedInvertedHomePlate { w, h, .. }
+        | Shape::RadiusedHomePlate { w, h, .. }
+        | Shape::Cross { w, h, .. }
+        | Shape::Dogbone { w, h, .. }
+        | Shape::DPack { w, h, .. } => w.min(*h),
         Shape::Unsupported => 0.0,
     }
 }
@@ -706,6 +959,48 @@ pub(crate) fn is_empty_shape(shape: &Shape) -> bool {
         }
         Shape::ButterflyRound { d } => !positive(&[*d]),
         Shape::ButterflySquare { s } => !positive(&[*s]),
+        Shape::HomePlate { w, h, c, ra, ro } | Shape::InvertedHomePlate { w, h, c, ra, ro } => {
+            !positive(&[*w, *h]) || ![*c, *ra, *ro].iter().all(|v| v.is_finite())
+        }
+        Shape::RadiusedInvertedHomePlate { w, h, ms, ra } => {
+            !positive(&[*w, *h]) || !ms.is_finite() || !ra.is_finite()
+        }
+        Shape::RadiusedHomePlate { w, h, r, ra } => {
+            !positive(&[*w, *h]) || !r.is_finite() || !ra.is_finite()
+        }
+        Shape::Cross {
+            w,
+            h,
+            hs,
+            vs,
+            hc,
+            vc,
+            ra,
+            ..
+        } => !positive(&[*w, *h, *hs, *vs]) || ![*hc, *vc, *ra].iter().all(|v| v.is_finite()),
+        Shape::Dogbone {
+            w,
+            h,
+            hs,
+            vs,
+            hc,
+            ra,
+            ..
+        } => !positive(&[*w, *h, *hs, *vs]) || !hc.is_finite() || !ra.is_finite(),
+        Shape::DPack {
+            w,
+            h,
+            hg,
+            vg,
+            columns,
+            rows,
+            ra,
+        } => {
+            !positive(&[*w, *h])
+                || ![*hg, *vg, *ra].iter().all(|v| v.is_finite())
+                || *columns == 0
+                || *rows == 0
+        }
         Shape::Unsupported => true,
     }
 }
@@ -832,6 +1127,15 @@ pub(crate) fn shape_to_aperture(shape: &Shape) -> Aperture {
                     oh,
                     lw,
                     &thermal_cuts(ow, oh, *angle_deg, *spokes, *gap, true),
+                    false,
+                ),
+                ThermalKind::LineThermal => open_corner_bars(
+                    &mut aperture,
+                    ow,
+                    oh,
+                    lw,
+                    &thermal_cuts(ow, oh, *angle_deg, *spokes, *gap, true),
+                    true,
                 ),
             }
             aperture.kind = ApertureKind::Macro;
@@ -954,10 +1258,276 @@ pub(crate) fn shape_to_aperture(shape: &Shape) -> Aperture {
             aperture.kind = ApertureKind::Macro;
             set_size(&mut aperture, 2.0 * s, 2.0 * s);
         }
+        Shape::HomePlate { w, h, c, ra, ro } => {
+            let (hw, hh) = (w / 2.0, h / 2.0);
+            let cut = c.clamp(0.0, *w);
+            outline(
+                &mut aperture,
+                &fillet(
+                    &[
+                        [-hw, -hh],
+                        [hw - cut, -hh],
+                        [hw, 0.0],
+                        [hw - cut, hh],
+                        [-hw, hh],
+                    ],
+                    &[0.0, *ro, *ra, *ro, 0.0],
+                ),
+            );
+            aperture.kind = ApertureKind::Macro;
+            set_size(&mut aperture, *w, *h);
+        }
+        Shape::InvertedHomePlate { w, h, c, ra, ro } => {
+            let (hw, hh) = (w / 2.0, h / 2.0);
+            let cut = c.clamp(0.0, *w);
+            outline(
+                &mut aperture,
+                &fillet(
+                    &[[-hw, -hh], [hw, -hh], [hw - cut, 0.0], [hw, hh], [-hw, hh]],
+                    &[0.0, *ra, *ro, *ra, 0.0],
+                ),
+            );
+            aperture.kind = ApertureKind::Macro;
+            set_size(&mut aperture, *w, *h);
+        }
+        Shape::RadiusedInvertedHomePlate { w, h, ms, ra } => {
+            let (hw, hh) = (w / 2.0, h / 2.0);
+            let radius = (ms / 2.0).clamp(0.0, hh.min(*w));
+            let mut points = fillet(&[[-hw, -hh], [hw, -hh], [hw, -radius]], &[*ra, *ra, 0.0]);
+            // The bite: a semicircle into the +x end, walked from -y to +y.
+            points.extend(arc_points(
+                hw,
+                0.0,
+                radius,
+                -90.0,
+                -270.0,
+                2 * OUTLINE_ARC_SEGMENTS,
+            ));
+            points.extend(fillet(
+                &[[hw, radius], [hw, hh], [-hw, hh]],
+                &[0.0, *ra, *ra],
+            ));
+            outline(&mut aperture, &points);
+            aperture.kind = ApertureKind::Macro;
+            set_size(&mut aperture, *w, *h);
+        }
+        Shape::RadiusedHomePlate { w, h, r, ra } => {
+            let (hw, hh) = (w / 2.0, h / 2.0);
+            let relief = r.clamp(0.0, *w);
+            let mut points = fillet(&[[-hw, -hh], [hw - relief, -hh]], &[*ra, *ra]);
+            if relief > 0.0 {
+                // The arc through (hw - relief, -hh), (hw, 0) and (hw - relief, hh).
+                let a = (hh * hh - relief * relief) / (2.0 * relief);
+                let radius = a + relief;
+                let cx = hw - radius;
+                let half_angle = (hh / radius).clamp(-1.0, 1.0).asin().to_degrees();
+                points.extend(arc_points(
+                    cx,
+                    0.0,
+                    radius,
+                    -half_angle,
+                    half_angle,
+                    2 * OUTLINE_ARC_SEGMENTS,
+                ));
+            } else {
+                points.push([hw, -hh]);
+                points.push([hw, hh]);
+            }
+            points.extend(fillet(&[[hw - relief, hh], [-hw, hh]], &[*ra, *ra]));
+            outline(&mut aperture, &points);
+            aperture.kind = ApertureKind::Macro;
+            set_size(&mut aperture, *w, *h);
+        }
+        Shape::Cross {
+            w,
+            h,
+            hs,
+            vs,
+            hc,
+            vc,
+            round,
+            ra,
+        } => {
+            let (hw, hh) = (w / 2.0, h / 2.0);
+            let (hs, vs) = (hs.min(*h), vs.min(*w));
+            let yb = (-hh + vc / 100.0 * h).clamp(-hh + hs / 2.0, hh - hs / 2.0);
+            let xb = (-hw + hc / 100.0 * w).clamp(-hw + vs / 2.0, hw - vs / 2.0);
+            let (l, r_, b, t) = (xb - vs / 2.0, xb + vs / 2.0, yb - hs / 2.0, yb + hs / 2.0);
+            let end_h = if *round { hs / 2.0 } else { 0.0 };
+            let end_v = if *round { vs / 2.0 } else { 0.0 };
+            outline(
+                &mut aperture,
+                &fillet(
+                    &[
+                        [hw, b],
+                        [hw, t],
+                        [r_, t],
+                        [r_, hh],
+                        [l, hh],
+                        [l, t],
+                        [-hw, t],
+                        [-hw, b],
+                        [l, b],
+                        [l, -hh],
+                        [r_, -hh],
+                        [r_, b],
+                    ],
+                    &[
+                        end_h, end_h, *ra, end_v, end_v, *ra, end_h, end_h, *ra, end_v, end_v, *ra,
+                    ],
+                ),
+            );
+            aperture.kind = ApertureKind::Macro;
+            set_size(&mut aperture, *w, *h);
+        }
+        Shape::Dogbone {
+            w,
+            h,
+            hs,
+            vs,
+            hc,
+            round,
+            ra,
+        } => {
+            let (hw, hh) = (w / 2.0, h / 2.0);
+            let hs = hs.min(h / 2.0);
+            let vs = vs.min(*w);
+            let xb = (-hw + hc / 100.0 * w).clamp(-hw + vs / 2.0, hw - vs / 2.0);
+            let (l, r_) = (xb - vs / 2.0, xb + vs / 2.0);
+            let (bt, tb) = (-hh + hs, hh - hs); // top of the bottom bar, bottom of the top bar
+            let end = if *round { hs / 2.0 } else { 0.0 };
+            outline(
+                &mut aperture,
+                &fillet(
+                    &[
+                        [-hw, -hh],
+                        [hw, -hh],
+                        [hw, bt],
+                        [r_, bt],
+                        [r_, tb],
+                        [hw, tb],
+                        [hw, hh],
+                        [-hw, hh],
+                        [-hw, tb],
+                        [l, tb],
+                        [l, bt],
+                        [-hw, bt],
+                    ],
+                    &[end, end, end, *ra, *ra, end, end, end, end, *ra, *ra, end],
+                ),
+            );
+            aperture.kind = ApertureKind::Macro;
+            set_size(&mut aperture, *w, *h);
+        }
+        Shape::DPack {
+            w,
+            h,
+            hg,
+            vg,
+            columns,
+            rows,
+            ra,
+        } => {
+            let (columns, rows) = (*columns as f32, *rows as f32);
+            let pad_w = (w - hg * (columns - 1.0)) / columns;
+            let pad_h = (h - vg * (rows - 1.0)) / rows;
+            if pad_w > 0.0 && pad_h > 0.0 {
+                for column in 0..columns as u32 {
+                    for row in 0..rows as u32 {
+                        let cx = -w / 2.0 + pad_w / 2.0 + column as f32 * (pad_w + hg);
+                        let cy = -h / 2.0 + pad_h / 2.0 + row as f32 * (pad_h + vg);
+                        let points: Vec<[f32; 2]> =
+                            rounded_rect_points(pad_w, pad_h, *ra, Corners::ALL)
+                                .into_iter()
+                                .map(|[x, y]| [x + cx, y + cy])
+                                .collect();
+                        outline(&mut aperture, &points);
+                    }
+                }
+            }
+            aperture.kind = ApertureKind::Macro;
+            set_size(&mut aperture, *w, *h);
+        }
         Shape::Unsupported => {}
     }
     finalize_aperture(&mut aperture);
     aperture
+}
+
+/// Round the corners of a polyline: vertex `i` is replaced by an arc of
+/// radius `radii[i]` tangent to its two edges (no change for a zero radius).
+/// The radius is limited so the arc never reaches past the middle of either
+/// edge. Works for convex and reflex corners alike, so it also produces the
+/// semicircular ends of round-style bars (both end corners rounded with half
+/// the bar thickness). The first and last vertices of an open polyline
+/// (`closed == false`) are never rounded.
+fn fillet(points: &[[f32; 2]], radii: &[f32]) -> Vec<[f32; 2]> {
+    fillet_path(points, radii, points.len() >= 3)
+}
+
+fn fillet_path(points: &[[f32; 2]], radii: &[f32], closed: bool) -> Vec<[f32; 2]> {
+    let n = points.len();
+    let mut out = Vec::with_capacity(n * 4);
+    for i in 0..n {
+        let v = points[i];
+        let radius = radii.get(i).copied().unwrap_or(0.0);
+        let (prev, next) = if closed {
+            (points[(i + n - 1) % n], points[(i + 1) % n])
+        } else if i == 0 || i + 1 == n {
+            out.push(v);
+            continue;
+        } else {
+            (points[i - 1], points[i + 1])
+        };
+        let a = [prev[0] - v[0], prev[1] - v[1]];
+        let b = [next[0] - v[0], next[1] - v[1]];
+        let (la, lb) = (a[0].hypot(a[1]), b[0].hypot(b[1]));
+        if radius <= 0.0 || la < EPSILON || lb < EPSILON {
+            out.push(v);
+            continue;
+        }
+        let ua = [a[0] / la, a[1] / la];
+        let ub = [b[0] / lb, b[1] / lb];
+        let cos_theta = (ua[0] * ub[0] + ua[1] * ub[1]).clamp(-1.0, 1.0);
+        let theta = cos_theta.acos(); // angle between the edges at v
+        if theta < 1e-3 || (std::f32::consts::PI - theta).abs() < 1e-3 {
+            out.push(v);
+            continue;
+        }
+        // Tangent length for the requested radius, limited to half of each edge.
+        let mut t = radius / (theta / 2.0).tan();
+        let t_max = (la / 2.0).min(lb / 2.0);
+        if t > t_max {
+            t = t_max;
+        }
+        let r = t * (theta / 2.0).tan();
+        let p1 = [v[0] + ua[0] * t, v[1] + ua[1] * t];
+        let p2 = [v[0] + ub[0] * t, v[1] + ub[1] * t];
+        let bisector = [ua[0] + ub[0], ua[1] + ub[1]];
+        let lbis = bisector[0].hypot(bisector[1]);
+        let d = r / (theta / 2.0).sin();
+        let centre = [v[0] + bisector[0] / lbis * d, v[1] + bisector[1] / lbis * d];
+        let start = (p1[1] - centre[1]).atan2(p1[0] - centre[0]).to_degrees();
+        let mut sweep = (p2[1] - centre[1]).atan2(p2[0] - centre[0]).to_degrees() - start;
+        while sweep > 180.0 {
+            sweep -= 360.0;
+        }
+        while sweep < -180.0 {
+            sweep += 360.0;
+        }
+        let segments = ((sweep.abs() / 90.0) * OUTLINE_ARC_SEGMENTS as f32)
+            .ceil()
+            .max(2.0) as usize;
+        out.extend(arc_points(
+            centre[0],
+            centre[1],
+            r,
+            start,
+            start + sweep,
+            segments,
+        ));
+    }
+    out
 }
 
 fn set_size(aperture: &mut Aperture, width: f32, height: f32) {
@@ -1554,7 +2124,14 @@ fn ring(aperture: &mut Aperture, outer: &[[f32; 2]], inner: Option<Vec<[f32; 2]>
 /// A spoke gap removes the part of a bar between the points where the gap's
 /// edges meet the bar's inner edge (a perpendicular cut, as in the
 /// specification pictures).
-fn open_corner_bars(aperture: &mut Aperture, ow: f32, oh: f32, lw: f32, cuts: &[Cut]) {
+fn open_corner_bars(
+    aperture: &mut Aperture,
+    ow: f32,
+    oh: f32,
+    lw: f32,
+    cuts: &[Cut],
+    round_ends: bool,
+) {
     let (iw, ih) = (ow - 2.0 * lw, oh - 2.0 * lw);
     if iw <= 0.0 || ih <= 0.0 || lw <= 0.0 {
         return;
@@ -1661,10 +2238,14 @@ fn open_corner_bars(aperture: &mut Aperture, ow: f32, oh: f32, lw: f32, cuts: &[
                     base[1] + axis[1] * t + outward[1] * depth,
                 ]
             };
-            outline(
-                aperture,
-                &[corner(a, 0.0), corner(b, 0.0), corner(b, lw), corner(a, lw)],
-            );
+            let bar = [corner(a, 0.0), corner(b, 0.0), corner(b, lw), corner(a, lw)];
+            if round_ends {
+                // `s_thr`: "ends of lines are rounded with diameter (os-is)/2".
+                let end = lw / 2.0;
+                outline(aperture, &fillet(&bar, &[end, end, end, end]));
+            } else {
+                outline(aperture, &bar);
+            }
         }
     }
 }
