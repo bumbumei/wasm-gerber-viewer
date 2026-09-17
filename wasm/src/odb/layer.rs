@@ -10,7 +10,7 @@ use super::features::{
 };
 use super::symbols::{
     is_empty_shape, parse_standard_symbol, pen_diameter, resize_shape, shape_key,
-    shape_to_aperture, solid_circle_diameter, Shape,
+    shape_to_aperture, solid_circle_diameter, Shape, ShapeKey,
 };
 use super::{store_diagnostics, Diagnostics};
 use crate::geometry::RegionContour;
@@ -18,8 +18,7 @@ use crate::interaction::FeatureKind;
 use crate::parser::geometry::{
     append_region_segment, execute_interpolation, finish_region_contours, flash_aperture,
     flush_path_regions_to_layer, flush_primitives_to_layer, interpolation_feature_kind,
-    record_flash_interactions, record_interpolation_interactions, record_primitive_delta,
-    Primitive,
+    record_interpolation_interactions, record_primitive_delta, Primitive,
 };
 use crate::parser::{GerberParser, Polarity, PolarityLayer};
 use std::collections::HashMap;
@@ -108,7 +107,7 @@ struct Driver<'a> {
     parser: &'a mut GerberParser,
     symbols: &'a HashMap<String, FileContext>,
     outline_mode: bool,
-    apertures_by_shape: HashMap<String, String>,
+    apertures_by_shape: HashMap<ShapeKey, String>,
     next_aperture_code: u32,
     expanded_records: usize,
     diagnostics: Diagnostics,
@@ -120,7 +119,7 @@ impl Driver<'_> {
             Record::Pad(pad) => self.emit_pad(pad, context, depth),
             Record::Line(line) => self.emit_line(line, context),
             Record::Arc(arc) => self.emit_arc(arc, context),
-            Record::Surface(surface) => self.emit_surface(surface),
+            Record::Surface(surface) => self.emit_surface(surface, None),
             Record::Text | Record::Barcode => Ok(()),
         }
     }
@@ -219,12 +218,13 @@ impl Driver<'_> {
         self.set_polarity(pad.neg)?;
         self.set_transform(pad.orient);
         let parser = &mut *self.parser;
-        parser.current_state.current_aperture = code.clone();
+        parser.current_state.current_aperture = code;
         flush_path_regions_to_layer(
             &mut parser.current_path_regions,
             parser.current_state.polarity,
             &mut parser.polarity_layers,
         )?;
+        let flashed_from = parser.current_primitives.len();
         flash_aperture(
             &parser.current_state,
             &parser.apertures,
@@ -234,16 +234,24 @@ impl Driver<'_> {
             pad.x,
             pad.y,
         )?;
-        if let Some(aperture) = parser.apertures.get(&code) {
-            record_flash_interactions(
-                parser.interaction_layer.as_mut(),
-                &code,
-                aperture,
-                &parser.current_state,
-                pad.x,
-                pad.y,
-            )?;
-        }
+        // Feature picking reads the primitives the flash just produced instead
+        // of building the same geometry a second time. ODB++ has no step and
+        // repeat, so the flash always appends exactly one feature's worth.
+        let state = &parser.current_state;
+        record_primitive_delta(
+            parser.interaction_layer.as_mut(),
+            FeatureKind::Flash,
+            &state.current_aperture,
+            parser.apertures.get(&state.current_aperture),
+            state.polarity,
+            &parser.current_primitives,
+            flashed_from,
+            state.layer_scale,
+            state.mirror_x,
+            state.mirror_y,
+            state.layer_rotation,
+            None,
+        );
         Ok(())
     }
 
@@ -269,8 +277,15 @@ impl Driver<'_> {
         self.diagnostics.barcodes += symbol.features.counts.barcodes;
         let placement = Placement::new(pad);
         for record in &symbol.features.records {
-            let placed = place_record(record, &placement);
-            self.emit(&placed, symbol, depth + 1)?;
+            match record {
+                // Surfaces carry every polygon and segment, so they are placed
+                // while they are drawn instead of being copied per pad.
+                Record::Surface(surface) => self.emit_surface(surface, Some(&placement))?,
+                other => {
+                    let placed = place_record(other, &placement);
+                    self.emit(&placed, symbol, depth + 1)?;
+                }
+            }
         }
         Ok(())
     }
@@ -483,11 +498,18 @@ impl Driver<'_> {
         Ok(())
     }
 
-    fn emit_surface(&mut self, surface: &Surface) -> Result<(), String> {
-        self.set_polarity(surface.neg)?;
+    /// Draw a surface, optionally moved into the coordinate system of the pad
+    /// that flashes the user symbol it belongs to.
+    fn emit_surface(
+        &mut self,
+        surface: &Surface,
+        placement: Option<&Placement>,
+    ) -> Result<(), String> {
+        let negative = surface.neg != placement.is_some_and(|placement| placement.neg);
+        self.set_polarity(negative)?;
         self.reset_transform();
         if self.outline_mode {
-            return self.stroke_surface(surface);
+            return self.stroke_surface(surface, placement);
         }
 
         // Each island with the holes that follow it forms one region group.
@@ -498,13 +520,13 @@ impl Driver<'_> {
             }
             if polygon.hole {
                 if !group.is_empty() {
-                    group.push(self.contour(polygon)?);
+                    group.push(self.contour(polygon, placement)?);
                 }
                 continue;
             }
             self.finish_group(&group)?;
             group.clear();
-            group.push(self.contour(polygon)?);
+            group.push(self.contour(polygon, placement)?);
         }
         self.finish_group(&group)
     }
@@ -531,21 +553,30 @@ impl Driver<'_> {
     }
 
     /// One polygon as a region contour, arcs kept as arcs.
-    fn contour(&mut self, polygon: &Polygon) -> Result<RegionContour, String> {
+    fn contour(
+        &mut self,
+        polygon: &Polygon,
+        placement: Option<&Placement>,
+    ) -> Result<RegionContour, String> {
         let mut contour = RegionContour::default();
-        contour.push_start([polygon.x0, polygon.y0])?;
+        let (x0, y0) = placed_point(placement, polygon.x0, polygon.y0);
+        contour.push_start([x0, y0])?;
         let state = &mut self.parser.current_state;
-        state.x = polygon.x0;
-        state.y = polygon.y0;
+        state.x = x0;
+        state.y = y0;
         for segment in &polygon.segments {
             let (x, y, i, j) = match *segment {
                 Segment::Line { x, y } => {
                     state.interpolation_mode = "linear".to_string();
+                    let (x, y) = placed_point(placement, x, y);
                     (x, y, 0.0, 0.0)
                 }
                 Segment::Arc { x, y, cx, cy, cw } => {
+                    let cw = placed_cw(placement, cw);
                     state.interpolation_mode =
                         if cw { "clockwise" } else { "counterclockwise" }.to_string();
+                    let (x, y) = placed_point(placement, x, y);
+                    let (cx, cy) = placed_point(placement, cx, cy);
                     (x, y, cx - state.x, cy - state.y)
                 }
             };
@@ -561,16 +592,22 @@ impl Driver<'_> {
     }
 
     /// Stroke every island and hole contour instead of filling (step profile).
-    fn stroke_surface(&mut self, surface: &Surface) -> Result<(), String> {
+    fn stroke_surface(
+        &mut self,
+        surface: &Surface,
+        placement: Option<&Placement>,
+    ) -> Result<(), String> {
         let code = self.circle_code(PROFILE_OUTLINE_WIDTH_MM);
         for polygon in &surface.polygons {
             if polygon.segments.is_empty() {
                 continue;
             }
-            let (mut x, mut y) = (polygon.x0, polygon.y0);
+            let (x0, y0) = placed_point(placement, polygon.x0, polygon.y0);
+            let (mut x, mut y) = (x0, y0);
             for segment in &polygon.segments {
                 match *segment {
                     Segment::Line { x: nx, y: ny } => {
+                        let (nx, ny) = placed_point(placement, nx, ny);
                         if nx != x || ny != y {
                             self.interpolate(&code, x, y, nx, ny, None)?;
                         }
@@ -584,14 +621,23 @@ impl Driver<'_> {
                         cy,
                         cw,
                     } => {
-                        self.interpolate(&code, x, y, nx, ny, Some((cx, cy, cw)))?;
+                        let (nx, ny) = placed_point(placement, nx, ny);
+                        let (cx, cy) = placed_point(placement, cx, cy);
+                        self.interpolate(
+                            &code,
+                            x,
+                            y,
+                            nx,
+                            ny,
+                            Some((cx, cy, placed_cw(placement, cw))),
+                        )?;
                         x = nx;
                         y = ny;
                     }
                 }
             }
-            if x != polygon.x0 || y != polygon.y0 {
-                self.interpolate(&code, x, y, polygon.x0, polygon.y0, None)?;
+            if x != x0 || y != y0 {
+                self.interpolate(&code, x, y, x0, y0, None)?;
             }
         }
         // Keep polarity layers in step with the Gerber path.
@@ -614,6 +660,23 @@ pub(crate) struct Placement {
     neg: bool,
     cos: f32,
     sin: f32,
+}
+
+/// A point of a user symbol in the coordinate system of the pad that flashes
+/// it (unchanged when the record is not part of a symbol).
+fn placed_point(placement: Option<&Placement>, x: f32, y: f32) -> (f32, f32) {
+    match placement {
+        Some(placement) => placement.point(x, y),
+        None => (x, y),
+    }
+}
+
+/// Mirroring a symbol reverses the direction of its arcs.
+fn placed_cw(placement: Option<&Placement>, cw: bool) -> bool {
+    match placement {
+        Some(placement) if placement.mirror => !cw,
+        _ => cw,
+    }
 }
 
 impl Placement {

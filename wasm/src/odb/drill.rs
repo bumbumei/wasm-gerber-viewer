@@ -42,9 +42,18 @@ pub(crate) fn drive(parser: &mut DrillParser, envelope: &Envelope) -> Result<(),
         })
         .collect();
 
-    // Tool codes are assigned per distinct diameter in first-use order.
+    // Tool codes are assigned per distinct diameter in first-use order. Both
+    // lookups are cached per symbol so a large drill file does not rescan the
+    // tool list and the code table for every hit.
     let mut codes_by_diameter: Vec<(f32, u32)> = Vec::new();
     let mut current_code = None;
+    let tool_by_num: HashMap<i64, usize> = tools
+        .iter()
+        .enumerate()
+        .map(|(index, tool)| (i64::from(tool.num), index))
+        .collect();
+    let mut code_by_symbol: HashMap<i64, u32> = HashMap::new();
+    let mut plated_by_feature: HashMap<(i64, i64), bool> = HashMap::new();
 
     for record in &features.records {
         let (sym, dcode) = match record {
@@ -65,10 +74,12 @@ pub(crate) fn drive(parser: &mut DrillParser, envelope: &Envelope) -> Result<(),
             continue;
         }
 
-        let plated = !matches!(
-            tool_for(&tools, dcode, diameter).map(|tool| tool.tool_type),
-            Some(ToolType::NonPlated)
-        );
+        let plated = *plated_by_feature.entry((dcode, sym)).or_insert_with(|| {
+            !matches!(
+                tool_for(&tools, &tool_by_num, dcode, diameter).map(|tool| tool.tool_type),
+                Some(ToolType::NonPlated)
+            )
+        });
         match envelope.plating {
             Plating::All => {}
             Plating::Plated if !plated => continue,
@@ -76,15 +87,22 @@ pub(crate) fn drive(parser: &mut DrillParser, envelope: &Envelope) -> Result<(),
             _ => {}
         }
 
-        let code = match codes_by_diameter
-            .iter()
-            .find(|(existing, _)| (existing - diameter).abs() <= TOOL_MATCH_TOLERANCE_MM)
-        {
-            Some((_, code)) => *code,
+        let code = match code_by_symbol.get(&sym) {
+            Some(code) => *code,
             None => {
-                let code = codes_by_diameter.len() as u32 + 1;
-                codes_by_diameter.push((diameter, code));
-                parser.declare_tool_mm(code, diameter);
+                let code = match codes_by_diameter
+                    .iter()
+                    .find(|(existing, _)| (existing - diameter).abs() <= TOOL_MATCH_TOLERANCE_MM)
+                {
+                    Some((_, code)) => *code,
+                    None => {
+                        let code = codes_by_diameter.len() as u32 + 1;
+                        codes_by_diameter.push((diameter, code));
+                        parser.declare_tool_mm(code, diameter);
+                        code
+                    }
+                };
+                code_by_symbol.insert(sym, code);
                 code
             }
         };
@@ -120,9 +138,14 @@ pub(crate) fn drive(parser: &mut DrillParser, envelope: &Envelope) -> Result<(),
 
 /// The `tools` entry for a feature: by tool number (the pad `dcode`) first,
 /// then by matching finished size.
-fn tool_for(tools: &[Tool], dcode: i64, diameter: f32) -> Option<&Tool> {
+fn tool_for<'a>(
+    tools: &'a [Tool],
+    by_num: &HashMap<i64, usize>,
+    dcode: i64,
+    diameter: f32,
+) -> Option<&'a Tool> {
     if dcode > 0 {
-        if let Some(tool) = tools.iter().find(|tool| i64::from(tool.num) == dcode) {
+        if let Some(tool) = by_num.get(&dcode).and_then(|index| tools.get(*index)) {
             return Some(tool);
         }
     }

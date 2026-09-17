@@ -1006,9 +1006,158 @@ pub(crate) fn is_empty_shape(shape: &Shape) -> bool {
 }
 
 /// A key that identifies equal shapes so one aperture serves every pad that
-/// uses the same symbol and resize.
-pub(crate) fn shape_key(shape: &Shape) -> String {
-    format!("{shape:?}")
+/// uses the same symbol and resize. It is built without allocating, because
+/// every pad and line of a layer looks its aperture up by this key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ShapeKey {
+    tag: u8,
+    fields: [u32; 9],
+}
+
+/// A shape field that can go into a `ShapeKey` (floats by their bit pattern,
+/// so equal shapes always produce an equal key).
+trait KeyField {
+    fn key_bits(&self) -> u32;
+}
+
+impl KeyField for f32 {
+    fn key_bits(&self) -> u32 {
+        // Normalise the two zeroes so `-0.0` and `0.0` share an aperture.
+        if *self == 0.0 {
+            0
+        } else {
+            self.to_bits()
+        }
+    }
+}
+
+impl KeyField for u32 {
+    fn key_bits(&self) -> u32 {
+        *self
+    }
+}
+
+impl KeyField for bool {
+    fn key_bits(&self) -> u32 {
+        u32::from(*self)
+    }
+}
+
+impl KeyField for Corners {
+    fn key_bits(&self) -> u32 {
+        u32::from(self.0)
+    }
+}
+
+impl KeyField for ThermalKind {
+    fn key_bits(&self) -> u32 {
+        *self as u32
+    }
+}
+
+/// Pack already-encoded fields into a key (at most nine per shape).
+fn shape_key_of(tag: u8, fields: &[u32]) -> ShapeKey {
+    let mut packed = [0u32; 9];
+    packed[..fields.len()].copy_from_slice(fields);
+    ShapeKey {
+        tag,
+        fields: packed,
+    }
+}
+
+macro_rules! shape_key {
+    ($tag:expr $(, $field:expr)*) => {
+        shape_key_of($tag, &[$(KeyField::key_bits(&$field)),*])
+    };
+}
+
+pub(crate) fn shape_key(shape: &Shape) -> ShapeKey {
+    match *shape {
+        Shape::Circle { d } => shape_key!(0, d),
+        Shape::Rect { w, h } => shape_key!(1, w, h),
+        Shape::RoundedRect { w, h, r, corners } => shape_key!(2, w, h, r, corners),
+        Shape::ChamferedRect { w, h, c, corners } => shape_key!(3, w, h, c, corners),
+        Shape::Oval { w, h } => shape_key!(4, w, h),
+        Shape::Diamond { w, h } => shape_key!(5, w, h),
+        Shape::Octagon { w, h, r } => shape_key!(6, w, h, r),
+        Shape::DonutRound { od, id } => shape_key!(7, od, id),
+        Shape::DonutSquare { od, id, r, corners } => shape_key!(8, od, id, r, corners),
+        Shape::DonutSquareRound { od, id } => shape_key!(9, od, id),
+        Shape::DonutRect {
+            ow,
+            oh,
+            lw,
+            r,
+            corners,
+        } => shape_key!(10, ow, oh, lw, r, corners),
+        Shape::DonutOval { ow, oh, lw } => shape_key!(11, ow, oh, lw),
+        Shape::Hexagon { w, h, r, vertical } => shape_key!(12, w, h, r, vertical),
+        Shape::Triangle { base, h } => shape_key!(13, base, h),
+        Shape::Thermal {
+            ow,
+            oh,
+            lw,
+            angle_deg,
+            spokes,
+            gap,
+            kind,
+            r,
+            corners,
+        } => shape_key!(14, ow, oh, lw, angle_deg, spokes, gap, kind, r, corners),
+        Shape::Ellipse { w, h } => shape_key!(15, w, h),
+        Shape::HalfOval { w, h } => shape_key!(16, w, h),
+        Shape::Moire {
+            ring_width,
+            ring_gap,
+            rings,
+            line_width,
+            line_length,
+            angle_deg,
+        } => shape_key!(
+            17,
+            ring_width,
+            ring_gap,
+            rings,
+            line_width,
+            line_length,
+            angle_deg
+        ),
+        Shape::ButterflyRound { d } => shape_key!(18, d),
+        Shape::ButterflySquare { s } => shape_key!(19, s),
+        Shape::HomePlate { w, h, c, ra, ro } => shape_key!(20, w, h, c, ra, ro),
+        Shape::InvertedHomePlate { w, h, c, ra, ro } => shape_key!(21, w, h, c, ra, ro),
+        Shape::RadiusedInvertedHomePlate { w, h, ms, ra } => shape_key!(22, w, h, ms, ra),
+        Shape::RadiusedHomePlate { w, h, r, ra } => shape_key!(23, w, h, r, ra),
+        Shape::Cross {
+            w,
+            h,
+            hs,
+            vs,
+            hc,
+            vc,
+            round,
+            ra,
+        } => shape_key!(24, w, h, hs, vs, hc, vc, round, ra),
+        Shape::Dogbone {
+            w,
+            h,
+            hs,
+            vs,
+            hc,
+            round,
+            ra,
+        } => shape_key!(25, w, h, hs, vs, hc, round, ra),
+        Shape::DPack {
+            w,
+            h,
+            hg,
+            vg,
+            columns,
+            rows,
+            ra,
+        } => shape_key!(26, w, h, hg, vg, columns, rows, ra),
+        Shape::Unsupported => shape_key!(27),
+    }
 }
 
 /// Build the aperture (primitives in millimetres, centred on the origin) for a shape.
@@ -1875,6 +2024,23 @@ impl Cut {
         ]
     }
 
+    /// True when the gap band reaches into a convex block, so the block is
+    /// cut away. The band is bounded by the two edges `half_width` either side
+    /// of `dir` and starts at `origin`, running outwards.
+    fn crosses(&self, block: &[[f32; 2]]) -> bool {
+        let normal = self.normal();
+        let (mut nearest, mut farthest, mut reach) = (f32::MAX, f32::MIN, f32::MIN);
+        for point in block {
+            let dx = point[0] - self.origin[0];
+            let dy = point[1] - self.origin[1];
+            let side = dx * normal[0] + dy * normal[1];
+            nearest = nearest.min(side);
+            farthest = farthest.max(side);
+            reach = reach.max(dx * self.dir[0] + dy * self.dir[1]);
+        }
+        reach > 0.0 && nearest <= self.half_width && farthest >= -self.half_width
+    }
+
     fn angle_deg(&self) -> f32 {
         let angle = self.dir[1].atan2(self.dir[0]).to_degrees();
         if angle < 0.0 {
@@ -2118,12 +2284,12 @@ fn ring(aperture: &mut Aperture, outer: &[[f32; 2]], inner: Option<Vec<[f32; 2]>
 
 /// `s_tho` / `rc_tho` ("open corners"): the ring is four straight bars, each
 /// spanning the inner edge of its side at full ring width, plus the corner
-/// blocks that join them. A diagonal spoke opens the corner it points at; an
-/// axis-aligned spoke splits its bar and opens both corners of that side
-/// (official viewer behaviour: `0x4` leaves eight bars, `45x2` two L pieces).
-/// A spoke gap removes the part of a bar between the points where the gap's
-/// edges meet the bar's inner edge (a perpendicular cut, as in the
-/// specification pictures).
+/// blocks that join them. Every gap removes what it passes through: a diagonal
+/// spoke takes the corner block it points at (leaving the four bars of the
+/// specification picture), an axis-aligned spoke cuts the middle of its own
+/// bar and leaves the corners joined (four L pieces, as the official viewer
+/// renders `s_tho...x0x4...`). Bars are cut where the gap's edges meet their
+/// inner edge, so the cut is perpendicular to the bar.
 fn open_corner_bars(
     aperture: &mut Aperture,
     ow: f32,
@@ -2136,37 +2302,22 @@ fn open_corner_bars(
     if iw <= 0.0 || ih <= 0.0 || lw <= 0.0 {
         return;
     }
-    // Corners 1..4 (top-right, top-left, bottom-left, bottom-right) stay
-    // closed unless a spoke opens them.
-    let mut closed = [true; 4];
-    for cut in cuts {
-        let step = (cut.angle_deg() / 45.0).round() as i32 % 8;
-        match step {
-            1 => closed[0] = false,
-            3 => closed[1] = false,
-            5 => closed[2] = false,
-            7 => closed[3] = false,
-            0 => (closed[0], closed[3]) = (false, false),
-            2 => (closed[0], closed[1]) = (false, false),
-            4 => (closed[1], closed[2]) = (false, false),
-            _ => (closed[2], closed[3]) = (false, false),
+    // The corner blocks join neighbouring bars. A corner is open only where a
+    // gap actually passes through it, so diagonal spokes open the corners
+    // while axis-aligned spokes cut the middle of their bar and leave the
+    // corners joined.
+    for [sx, sy] in CORNER_SIGNS {
+        let block = [
+            [sx * iw / 2.0, sy * ih / 2.0],
+            [sx * ow / 2.0, sy * ih / 2.0],
+            [sx * ow / 2.0, sy * oh / 2.0],
+            [sx * iw / 2.0, sy * oh / 2.0],
+        ];
+        if !cuts.iter().any(|cut| cut.crosses(&block)) {
+            outline(aperture, &block);
         }
     }
-    for (corner, keep) in closed.iter().enumerate() {
-        if !keep {
-            continue;
-        }
-        let [sx, sy] = CORNER_SIGNS[corner];
-        outline(
-            aperture,
-            &[
-                [sx * iw / 2.0, sy * ih / 2.0],
-                [sx * ow / 2.0, sy * ih / 2.0],
-                [sx * ow / 2.0, sy * oh / 2.0],
-                [sx * iw / 2.0, sy * oh / 2.0],
-            ],
-        );
-    }
+
     // (inner edge base point, unit axis along the bar, half extent, outward normal)
     let bars = [
         ([0.0, ih / 2.0], [1.0, 0.0], iw / 2.0, [0.0, 1.0]),

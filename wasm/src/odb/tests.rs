@@ -474,13 +474,16 @@ fn symbol_geometry_matches_reference_viewer() {
     assert!(!covers(&s_tho, 0.6, 0.95), "bar ends before the corner");
     assert!(!covers(&s_tho, 0.95, 0.95), "corner is open");
     assert!(!covers(&s_tho, 0.0, 0.0));
+    // Axis-aligned spokes cut their own bar and leave the corners joined, so
+    // the ring becomes four L pieces.
     let s_tho0 = shape_to_aperture(&thermal(2.4, 1.4, 0.0, 4, 0.3, ThermalKind::SquareOpen));
     assert!(
         !covers(&s_tho0, 0.0, 0.95),
         "gap splits the bar in the middle"
     );
     assert!(covers(&s_tho0, 0.4, 0.95));
-    assert!(!covers(&s_tho0, 0.95, 0.95), "corner is still open");
+    assert!(covers(&s_tho0, 0.95, 0.95), "corners stay joined");
+    assert!(!covers(&s_tho0, 0.0, 0.0));
     // Two diagonal spokes: only their corners open, the other two stay closed.
     let s_tho2 = shape_to_aperture(&thermal(2.4, 1.4, 45.0, 2, 0.3, ThermalKind::SquareOpen));
     assert!(
@@ -495,6 +498,10 @@ fn symbol_geometry_matches_reference_viewer() {
     assert!(
         covers(&s_tho2, 0.95, -0.95),
         "bottom-right corner stays closed"
+    );
+    assert!(
+        covers(&s_tho2, 0.0, 0.95),
+        "no axis spoke, so the top bar is whole"
     );
     assert!(
         covers(&s_tho2, -0.95, 0.0),
@@ -902,6 +909,56 @@ fn user_symbols_expand_in_place_with_nesting_and_polarity() {
         diagnostics.contains("resize ignored on user-defined symbols (fid)"),
         "{diagnostics}"
     );
+}
+
+#[test]
+fn user_symbol_surfaces_are_placed_at_every_pad() {
+    // A symbol whose only record is a surface: it is drawn straight into the
+    // pad's coordinate system instead of being copied per pad.
+    let symbol = "UNITS=MM
+S P 0
+OB 0 0 I
+OS 2 0
+OS 2 1
+OS 0 1
+OS 0 0
+OE
+OB 0.4 0.4 H
+OS 1.6 0.4
+OS 1.6 0.6
+OS 0.4 0.6
+OS 0.4 0.4
+OE
+SE
+";
+    let text = envelope(
+        "signal",
+        "UNITS=MM
+$0 plate
+P 10 10 0 P 0 0
+P 20 20 0 N 0 4
+",
+        &[("symbols/plate", symbol)],
+    );
+    let payload = parse_gerber_payload_with_options(&text, true, 1).unwrap();
+    let (min_x, max_x, min_y, max_y) = layer_bounds(&payload.render_layers);
+    assert_approx(min_x, 10.0);
+    // The mirrored copy runs from 18 to 20, not from 20 to 22.
+    assert_approx(max_x, 20.0);
+    assert_approx(min_y, 10.0);
+    assert_approx(max_y, 21.0);
+    assert!(
+        payload.render_layers.iter().any(|layer| layer.is_negative),
+        "the negative pad clears its surface"
+    );
+    let regions = payload
+        .interaction_layer
+        .unwrap()
+        .features
+        .iter()
+        .filter(|feature| feature.descriptor.kind == FeatureKind::Region)
+        .count();
+    assert_eq!(regions, 2, "one region per pad");
 }
 
 #[test]
