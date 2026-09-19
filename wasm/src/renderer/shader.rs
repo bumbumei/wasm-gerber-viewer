@@ -179,7 +179,13 @@ impl ShaderPrograms {
             TRIANGLE_TEMPLATE_VERTEX_SHADER,
             TRIANGLE_TEMPLATE_FRAGMENT_SHADER,
             &["position", "instance_x", "instance_y"],
-            &["transform", "color"],
+            &[
+                "transform",
+                "color",
+                "viewport_size",
+                "minimum_feature_pixels",
+                "template_half_extent",
+            ],
         )?;
         pending.track(&triangle_template);
 
@@ -220,6 +226,7 @@ impl ShaderPrograms {
                 "transform",
                 "color",
                 "viewport_size",
+                "minimum_feature_pixels",
                 "inner_outline_pixels",
                 "inner_outline_world",
             ],
@@ -239,7 +246,12 @@ impl ShaderPrograms {
                 "hole_y_instance",
                 "hole_radius_instance",
             ],
-            &["transform", "color"],
+            &[
+                "transform",
+                "color",
+                "viewport_size",
+                "minimum_feature_pixels",
+            ],
         )?;
         pending.track(&circle_holed);
 

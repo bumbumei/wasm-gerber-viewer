@@ -6352,6 +6352,8 @@ impl Renderer {
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
+        viewport_width: u32,
+        viewport_height: u32,
     ) -> Result<(), JsValue> {
         if layer_id >= self.layers.len() {
             return Err(JsValue::from_str("Invalid layer index"));
@@ -6397,6 +6399,7 @@ impl Renderer {
                         "triangle template instance count",
                         template.instance_x.len(),
                     )?;
+                    let half_extent = template_half_extent(&template.vertices);
                     let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
                     pending_cache
                         .cache
@@ -6452,6 +6455,7 @@ impl Renderer {
                     template_cache.vao = built_template_cache.vao.take();
                     template_cache.vertex_count = vertex_count;
                     template_cache.instance_count = instance_count;
+                    template_cache.half_extent = half_extent;
                     template_cache.vertex_buffer = built_template_cache.vertex_buffer.take();
                     template_cache.instance_x_buffer =
                         built_template_cache.instance_x_buffer.take();
@@ -6484,6 +6488,16 @@ impl Renderer {
             if let Some(loc) = program.uniforms.get("color") {
                 self.gl.uniform4fv_with_f32_array(Some(loc), color);
             }
+            if let Some(loc) = program.uniforms.get("template_half_extent") {
+                self.gl.uniform1f(Some(loc), template_cache.half_extent);
+            }
+            self.set_view_feature_uniforms(
+                program,
+                viewport_width,
+                viewport_height,
+                layer.inner_outline_pixels,
+                layer.inner_outline_world,
+            );
 
             self.gl
                 .draw_arrays_instanced(TRIANGLES, 0, vertex_count, instance_count);
@@ -7462,6 +7476,8 @@ impl Renderer {
                 &white_color,
                 layer_id,
                 sublayer_idx,
+                viewport_width,
+                viewport_height,
             )?;
             self.draw_instanced_lines(
                 transform,
@@ -9607,6 +9623,29 @@ impl Drop for Renderer {
         self.gl.delete_buffer(Some(&self.quad_buffer));
         Self::delete_shader_programs(&self.gl, &self.programs);
     }
+}
+
+/// Half of the smaller bounding-box side of a triangle template (interleaved
+/// x/y vertices in world units). This is the template's narrowest dimension,
+/// which the minimum-visibility clamp compares with the pixel minimum, so a
+/// thin rectangular pad is held at the same on-screen width as a line of the
+/// same thickness. Zero for empty or non-finite input.
+fn template_half_extent(vertices: &[f32]) -> f32 {
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for pair in vertices.chunks_exact(2) {
+        let (x, y) = (pair[0], pair[1]);
+        if !x.is_finite() || !y.is_finite() {
+            return 0.0;
+        }
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    if min_x > max_x || min_y > max_y {
+        return 0.0;
+    }
+    ((max_x - min_x).min(max_y - min_y) * 0.5).max(0.0)
 }
 
 #[cfg(test)]

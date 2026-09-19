@@ -558,3 +558,19 @@ fn tile_inputs_reject_coordinates_beyond_exact_f32_integer_range() {
     assert!(Renderer::validate_tile_inputs(MAX_EXACT + 1, 1, 0, 0, 1, 1).is_err());
     assert!(Renderer::validate_tile_inputs(1, MAX_EXACT + 1, 0, 0, 1, 1).is_err());
 }
+
+#[test]
+fn template_half_extent_is_half_the_narrow_side() {
+    // A 2 x 0.4 rectangle as two triangles: the narrow side decides.
+    let thin = [
+        -1.0, -0.2, 1.0, -0.2, 1.0, 0.2, //
+        -1.0, -0.2, 1.0, 0.2, -1.0, 0.2,
+    ];
+    assert!((template_half_extent(&thin) - 0.2).abs() < 1e-6);
+    let square = [
+        -0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, 0.5,
+    ];
+    assert!((template_half_extent(&square) - 0.5).abs() < 1e-6);
+    assert_eq!(template_half_extent(&[]), 0.0);
+    assert_eq!(template_half_extent(&[0.0, f32::NAN, 1.0, 1.0]), 0.0);
+}

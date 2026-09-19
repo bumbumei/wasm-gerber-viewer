@@ -2945,7 +2945,7 @@ export class GerberViewer {
         this.minimumFeaturePixels,
       );
       this.configureWasmProcessorOptions(this.wasmProcessor);
-      this.showError(`Failed to apply minimum line width: ${getErrorMessage(error)}`);
+      this.showError(`Failed to apply minimum feature width: ${getErrorMessage(error)}`);
     } finally {
       this.updateUiState();
     }

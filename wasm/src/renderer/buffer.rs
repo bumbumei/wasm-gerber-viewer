@@ -17,6 +17,9 @@ pub struct TriangleTemplateBufferCache {
     pub vao: Option<WebGlVertexArrayObject>,
     pub vertex_count: i32,
     pub instance_count: i32,
+    /// Half of the template's smaller bounding-box side (world units), used
+    /// by the minimum-visibility clamp once the CPU geometry is released.
+    pub half_extent: f32,
     pub vertex_buffer: Option<WebGlBuffer>,
     pub instance_x_buffer: Option<WebGlBuffer>,
     pub instance_y_buffer: Option<WebGlBuffer>,
