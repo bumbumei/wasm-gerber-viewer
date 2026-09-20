@@ -40,11 +40,9 @@ void main() {
         : 0.0;
     float trueRadius = max(radius_instance, 0.0);
     float effectiveRadius = max(trueRadius, minimumRadius);
-    // Coverage scaled by the area ratio when the pad is held at the minimum
+    // Coverage scaled by the size ratio when the pad is held at the minimum
     // (see circle.vert.glsl).
-    vCoverage = trueRadius > 0.0
-        ? (trueRadius * trueRadius) / (effectiveRadius * effectiveRadius)
-        : 1.0;
+    vCoverage = trueRadius > 0.0 ? trueRadius / effectiveRadius : 1.0;
     vec2 scaledPos = position * effectiveRadius + center;
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);

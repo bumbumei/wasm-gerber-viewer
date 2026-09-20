@@ -42,10 +42,12 @@ void main() {
     float trueRadius = max(radius_instance, 0.0);
     float baseRadius = max(trueRadius, minimumRadius);
     // A pad held at the minimum is drawn larger than it is, so its coverage
-    // is scaled down by the area ratio. Coverage adds up in the layer mask,
-    // so a dense array shows its real copper density instead of a solid
-    // block. A zero-size pen (r0) keeps one visible pixel.
-    vCoverage = trueRadius > 0.0 ? (trueRadius * trueRadius) / (baseRadius * baseRadius) : 1.0;
+    // is scaled down by the size ratio. Coverage adds up in the layer mask,
+    // so a dense array reads as a lighter texture instead of a solid block,
+    // while single pads stay clearly visible (the exact area ratio makes a
+    // 20 % copper array almost vanish on a dark background). A zero-size pen
+    // (r0) keeps one visible pixel.
+    vCoverage = trueRadius > 0.0 ? trueRadius / baseRadius : 1.0;
     float outlineWorldRadius = inner_outline_world + inner_outline_pixels / pixelsPerWorld;
     float effectiveRadius = baseRadius + outlineWorldRadius;
     vec2 scaledPos = position * effectiveRadius + center;
