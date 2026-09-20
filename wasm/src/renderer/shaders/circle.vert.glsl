@@ -11,6 +11,7 @@ uniform float inner_outline_pixels;
 uniform float inner_outline_world;
 out highp vec2 vPosition;
 out highp float vInnerRadius;
+out highp float vCoverage;
 
 // The smallest on-screen scale of the current transform, in pixels per world
 // unit (the shorter axis when the view is anisotropic).
@@ -38,7 +39,13 @@ void main() {
     float minimumRadius = minimum_feature_pixels > 0.0
         ? max(0.5 * minimum_feature_pixels, 0.70710678) / pixelsPerWorld
         : 0.0;
-    float baseRadius = max(max(radius_instance, 0.0), minimumRadius);
+    float trueRadius = max(radius_instance, 0.0);
+    float baseRadius = max(trueRadius, minimumRadius);
+    // A pad held at the minimum is drawn larger than it is, so its coverage
+    // is scaled down by the area ratio. Coverage adds up in the layer mask,
+    // so a dense array shows its real copper density instead of a solid
+    // block. A zero-size pen (r0) keeps one visible pixel.
+    vCoverage = trueRadius > 0.0 ? (trueRadius * trueRadius) / (baseRadius * baseRadius) : 1.0;
     float outlineWorldRadius = inner_outline_world + inner_outline_pixels / pixelsPerWorld;
     float effectiveRadius = baseRadius + outlineWorldRadius;
     vec2 scaledPos = position * effectiveRadius + center;

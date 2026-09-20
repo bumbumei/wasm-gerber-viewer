@@ -13,6 +13,7 @@ uniform float minimum_feature_pixels;
 out highp vec2 vPosition;
 out highp vec2 vHoleCenter;
 out highp float vHoleRadius;
+out highp float vCoverage;
 
 // The smallest on-screen scale of the current transform, in pixels per world
 // unit (the shorter axis when the view is anisotropic).
@@ -37,7 +38,13 @@ void main() {
     float minimumRadius = minimum_feature_pixels > 0.0
         ? max(0.5 * minimum_feature_pixels, 0.70710678) / pixelsPerWorld
         : 0.0;
-    float effectiveRadius = max(max(radius_instance, 0.0), minimumRadius);
+    float trueRadius = max(radius_instance, 0.0);
+    float effectiveRadius = max(trueRadius, minimumRadius);
+    // Coverage scaled by the area ratio when the pad is held at the minimum
+    // (see circle.vert.glsl).
+    vCoverage = trueRadius > 0.0
+        ? (trueRadius * trueRadius) / (effectiveRadius * effectiveRadius)
+        : 1.0;
     vec2 scaledPos = position * effectiveRadius + center;
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);

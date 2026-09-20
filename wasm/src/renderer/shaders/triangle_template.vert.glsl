@@ -8,6 +8,7 @@ uniform vec2 viewport_size;
 uniform float minimum_feature_pixels;
 // Half of the template's smaller bounding-box side, in world units.
 uniform float template_half_extent;
+out highp float vCoverage;
 
 // The smallest on-screen scale of the current transform, in pixels per world
 // unit (the shorter axis when the view is anisotropic).
@@ -36,6 +37,8 @@ void main() {
     float scale = template_half_extent > 0.000001
         ? max(1.0, minimumHalfExtent / template_half_extent)
         : 1.0;
+    // Coverage scaled by the area ratio of the enlargement (see circle.vert.glsl).
+    vCoverage = 1.0 / (scale * scale);
     vec2 worldPosition = position * scale + vec2(instance_x, instance_y);
     vec3 transformed = transform * vec3(worldPosition, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);

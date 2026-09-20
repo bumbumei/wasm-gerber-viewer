@@ -3,6 +3,7 @@ precision highp float;
 in highp vec2 vPosition;
 in highp vec2 vHoleCenter;
 in highp float vHoleRadius;
+in highp float vCoverage;
 uniform lowp vec4 color;
 out lowp vec4 fragColor;
 void main() {
@@ -12,5 +13,5 @@ void main() {
         vec2 diff = vPosition - vHoleCenter;
         if (dot(diff, diff) < vHoleRadius * vHoleRadius) discard;
     }
-    fragColor = color;
+    fragColor = color * vCoverage;
 }
