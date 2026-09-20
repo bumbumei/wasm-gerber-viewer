@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { fileURLToPath } from "node:url";
 
 // Dense arrays of small pads, as a fine-pitch BGA produces: 40 x 40 round
 // pads of 0.25 mm at 0.5 mm pitch, the same array flashed with a macro
@@ -141,4 +142,17 @@ test("minimum visibility keeps dense pad arrays visible when zoomed out", async 
   // all; with it every pad covers at least one pixel.
   expect(inkOnePixel).toBeGreaterThan(inkOff * 1.5);
   expect(inkTwoPixels).toBeGreaterThan(inkOnePixel);
+});
+
+test("the BGA test patterns demo loads with every array visible", async ({ page }) => {
+  await page.goto("/");
+  await page
+    .locator("#file-input")
+    .setInputFiles(fileURLToPath(new URL("../../demo/bga-test-patterns.gbr", import.meta.url)));
+  await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+  await expect(page.locator("#visible-layer-count")).toHaveText("1 / 1");
+
+  // Ten arrays of at least 256 pads each: even at fit zoom the canvas holds
+  // far more ink than the 125 x 80 mm outline alone (about 1,300 pixels).
+  expect(await inkPixels(page)).toBeGreaterThan(20_000);
 });
