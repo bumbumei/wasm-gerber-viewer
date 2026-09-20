@@ -99,20 +99,34 @@ function denseBgaGerber(arrayName) {
   return `${lines.join("\n")}\n`;
 }
 
-/** Number of canvas pixels that differ from the background. */
-async function inkPixels(page) {
+/** Canvas pixels that differ from the background: how many, and the summed
+ *  colour distance from the background (brightness matters once edges are
+ *  anti-aliased, because a sub-pixel pad shows as a dim pixel). */
+async function ink(page) {
   return page.locator("#gerber-canvas").evaluate((canvas) => {
     const gl = canvas.getContext("webgl2");
     gl.finish();
     const pixels = new Uint8Array(canvas.width * canvas.height * 4);
     gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
     const [r, g, b] = pixels;
-    let ink = 0;
+    let count = 0;
+    let sum = 0;
     for (let index = 0; index < pixels.length; index += 4) {
-      if (pixels[index] !== r || pixels[index + 1] !== g || pixels[index + 2] !== b) ink++;
+      const dr = Math.abs(pixels[index] - r);
+      const dg = Math.abs(pixels[index + 1] - g);
+      const db = Math.abs(pixels[index + 2] - b);
+      if (dr || dg || db) {
+        count++;
+        sum += dr + dg + db;
+      }
     }
-    return ink;
+    return { count, sum };
   });
+}
+
+/** Number of canvas pixels that differ from the background. */
+async function inkPixels(page) {
+  return (await ink(page)).count;
 }
 
 async function setMinimumVisibility(page, value) {
@@ -143,17 +157,20 @@ for (const arrayName of Object.keys(PAD_ARRAYS)) {
     await page.waitForTimeout(500);
 
     await setMinimumVisibility(page, 0);
-    const inkOff = await inkPixels(page);
+    const inkOff = await ink(page);
     await setMinimumVisibility(page, 1);
-    const inkOnePixel = await inkPixels(page);
+    const inkOnePixel = await ink(page);
     await setMinimumVisibility(page, 2);
-    const inkTwoPixels = await inkPixels(page);
+    const inkTwoPixels = await ink(page);
 
-    expect(inkOff).toBeGreaterThan(0);
-    // Without the clamp about half of the sub-pixel pads are not drawn at
-    // all; with it every pad covers at least one pixel.
-    expect(inkOnePixel).toBeGreaterThan(inkOff * 1.5);
-    expect(inkTwoPixels).toBeGreaterThan(inkOnePixel);
+    expect(inkOff.count).toBeGreaterThan(0);
+    // Without the clamp a sub-pixel pad is a dim anti-aliased pixel or, for
+    // the multisampled shapes, missing altogether; holding every pad at one
+    // pixel adds both lit pixels and brightness (measured 1.2x to 2x), and
+    // two pixels adds more again.
+    expect(inkOnePixel.count).toBeGreaterThan(inkOff.count * 1.1);
+    expect(inkOnePixel.sum).toBeGreaterThan(inkOff.sum * 1.1);
+    expect(inkTwoPixels.sum).toBeGreaterThan(inkOnePixel.sum * 1.05);
   });
 }
 

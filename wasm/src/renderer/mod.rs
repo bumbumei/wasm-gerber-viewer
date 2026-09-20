@@ -97,11 +97,13 @@ pub struct LayerMetadata {
 /// WebGL renderer for Gerber graphics with multi-layer support
 /// Shared multisampled render target. Every layer mask is drawn into it and
 /// resolved into the layer's own texture, so one allocation anti-aliases all
-/// layers.
+/// layers: width x height x samples x (1 byte colour + 1 byte stencil).
 struct MsaaTarget {
     framebuffer: WebGlFramebuffer,
     color: web_sys::WebGlRenderbuffer,
-    depth_stencil: web_sys::WebGlRenderbuffer,
+    /// `STENCIL_INDEX8` where the context multisamples it (1 byte per
+    /// sample), otherwise `DEPTH24_STENCIL8`.
+    stencil: web_sys::WebGlRenderbuffer,
     width: u32,
     height: u32,
     internal_format: u32,
@@ -9155,82 +9157,94 @@ impl Renderer {
         let height_i32 = Self::checked_u32_to_i32("MSAA height", height).ok()?;
         Self::drain_gl_errors(gl);
 
-        let framebuffer = gl.create_framebuffer()?;
-        let color = match gl.create_renderbuffer() {
-            Some(color) => color,
-            None => {
-                gl.delete_framebuffer(Some(&framebuffer));
-                return None;
-            }
-        };
-        let depth_stencil = match gl.create_renderbuffer() {
-            Some(depth_stencil) => depth_stencil,
-            None => {
-                gl.delete_framebuffer(Some(&framebuffer));
-                gl.delete_renderbuffer(Some(&color));
-                return None;
-            }
-        };
-        let target = MsaaTarget {
-            framebuffer,
-            color,
-            depth_stencil,
-            width,
-            height,
-            internal_format,
-        };
+        // A stencil-only buffer costs one byte per sample; fall back to the
+        // packed depth-stencil format where the context will not multisample
+        // it.
+        for (stencil_format, attachment) in [
+            (
+                WebGl2RenderingContext::STENCIL_INDEX8,
+                WebGl2RenderingContext::STENCIL_ATTACHMENT,
+            ),
+            (
+                WebGl2RenderingContext::DEPTH24_STENCIL8,
+                WebGl2RenderingContext::DEPTH_STENCIL_ATTACHMENT,
+            ),
+        ] {
+            let framebuffer = gl.create_framebuffer()?;
+            let color = match gl.create_renderbuffer() {
+                Some(color) => color,
+                None => {
+                    gl.delete_framebuffer(Some(&framebuffer));
+                    return None;
+                }
+            };
+            let stencil = match gl.create_renderbuffer() {
+                Some(stencil) => stencil,
+                None => {
+                    gl.delete_framebuffer(Some(&framebuffer));
+                    gl.delete_renderbuffer(Some(&color));
+                    return None;
+                }
+            };
+            let target = MsaaTarget {
+                framebuffer,
+                color,
+                stencil,
+                width,
+                height,
+                internal_format,
+            };
 
-        gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, Some(&target.color));
-        gl.renderbuffer_storage_multisample(
-            WebGl2RenderingContext::RENDERBUFFER,
-            samples,
-            internal_format,
-            width_i32,
-            height_i32,
-        );
-        gl.bind_renderbuffer(
-            WebGl2RenderingContext::RENDERBUFFER,
-            Some(&target.depth_stencil),
-        );
-        gl.renderbuffer_storage_multisample(
-            WebGl2RenderingContext::RENDERBUFFER,
-            samples,
-            WebGl2RenderingContext::DEPTH24_STENCIL8,
-            width_i32,
-            height_i32,
-        );
-        gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
-        gl.bind_framebuffer(
-            WebGl2RenderingContext::FRAMEBUFFER,
-            Some(&target.framebuffer),
-        );
-        gl.framebuffer_renderbuffer(
-            WebGl2RenderingContext::FRAMEBUFFER,
-            WebGl2RenderingContext::COLOR_ATTACHMENT0,
-            WebGl2RenderingContext::RENDERBUFFER,
-            Some(&target.color),
-        );
-        gl.framebuffer_renderbuffer(
-            WebGl2RenderingContext::FRAMEBUFFER,
-            WebGl2RenderingContext::DEPTH_STENCIL_ATTACHMENT,
-            WebGl2RenderingContext::RENDERBUFFER,
-            Some(&target.depth_stencil),
-        );
-        let status = gl.check_framebuffer_status(WebGl2RenderingContext::FRAMEBUFFER);
-        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
-        if status != WebGl2RenderingContext::FRAMEBUFFER_COMPLETE
-            || gl.get_error() != WebGl2RenderingContext::NO_ERROR
-        {
+            gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, Some(&target.color));
+            gl.renderbuffer_storage_multisample(
+                WebGl2RenderingContext::RENDERBUFFER,
+                samples,
+                internal_format,
+                width_i32,
+                height_i32,
+            );
+            gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, Some(&target.stencil));
+            gl.renderbuffer_storage_multisample(
+                WebGl2RenderingContext::RENDERBUFFER,
+                samples,
+                stencil_format,
+                width_i32,
+                height_i32,
+            );
+            gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
+            gl.bind_framebuffer(
+                WebGl2RenderingContext::FRAMEBUFFER,
+                Some(&target.framebuffer),
+            );
+            gl.framebuffer_renderbuffer(
+                WebGl2RenderingContext::FRAMEBUFFER,
+                WebGl2RenderingContext::COLOR_ATTACHMENT0,
+                WebGl2RenderingContext::RENDERBUFFER,
+                Some(&target.color),
+            );
+            gl.framebuffer_renderbuffer(
+                WebGl2RenderingContext::FRAMEBUFFER,
+                attachment,
+                WebGl2RenderingContext::RENDERBUFFER,
+                Some(&target.stencil),
+            );
+            let status = gl.check_framebuffer_status(WebGl2RenderingContext::FRAMEBUFFER);
+            gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+            if status == WebGl2RenderingContext::FRAMEBUFFER_COMPLETE
+                && gl.get_error() == WebGl2RenderingContext::NO_ERROR
+            {
+                return Some(target);
+            }
+            Self::drain_gl_errors(gl);
             Self::delete_msaa_target(gl, target);
-            return None;
         }
-        Some(target)
+        None
     }
 
     fn delete_msaa_target(gl: &WebGl2RenderingContext, target: MsaaTarget) {
         gl.delete_framebuffer(Some(&target.framebuffer));
         gl.delete_renderbuffer(Some(&target.color));
-        gl.delete_renderbuffer(Some(&target.depth_stencil));
+        gl.delete_renderbuffer(Some(&target.stencil));
     }
 
     fn render_composite_fbo(
