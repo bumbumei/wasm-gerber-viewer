@@ -18,7 +18,7 @@ const c = (mm) => Math.round(mm * 1e6);
 const point = (x, y) => `X${c(x)}Y${c(y)}`;
 
 // The real stencil's 20 x 20 grid; '#' is a populated pad.
-const JABIL_RINGS = [
+const STENCIL_RINGS = [
   "####################",
   "####################",
   "##................##",
@@ -136,7 +136,7 @@ const octagon = aperture("OCTAGON");
 // Row A (y = 58): stencil-style regions and round pads --------------------
 let n;
 n = regionArray("A1 CircuitCAM stencil BGA replica", 15, 58, 20, 20, 0.8,
-  (col, row) => JABIL_RINGS[19 - row][col] === "#",
+  (col, row) => STENCIL_RINGS[19 - row][col] === "#",
   (x, y) => squareRegion(x, y, 0.4));
 describe("A1", 15, 58, n, "0.8 mm pitch, 0.4 mm square G36 regions, concentric ring depopulation (real stencil layout)");
 
