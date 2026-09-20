@@ -3183,6 +3183,7 @@ impl Renderer {
             template_cache.vao = Some(vao);
             template_cache.vertex_count = vertex_count;
             template_cache.instance_count = instance_count;
+            template_cache.half_size = triangle_bounds_half_size(&vertices.to_vec());
             let vertex_buffer = Self::create_attrib_buffer_from_js_array(
                 &self.gl,
                 &vertices,
