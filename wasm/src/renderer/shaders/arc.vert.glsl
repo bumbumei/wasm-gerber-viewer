@@ -40,10 +40,14 @@ void main() {
     float effectiveThickness = max(thickness_instance, minimumWorldThickness)
         + outlineWorldThickness * 2.0;
     float maxRadius = max(radius_instance + effectiveThickness * 0.5, 0.0);
-    vec2 scaledPos = position * maxRadius + vec2(center_x_instance, center_y_instance);
+    // Anti-aliasing fringe: the quad grows by half a pixel so the soft edge
+    // has room; vPosition stays in world units so the fragment tests are
+    // unchanged.
+    float drawnRadius = maxRadius + 0.5 / max(pixelsPerWorld, 0.000001);
+    vec2 scaledPos = position * drawnRadius + vec2(center_x_instance, center_y_instance);
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
-    vPosition = position * maxRadius;
+    vPosition = position * drawnRadius;
     vRadius = radius_instance;
     vStartAngle = startAngle_instance;
     vSweepAngle = sweepAngle_instance;

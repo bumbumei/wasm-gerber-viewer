@@ -50,9 +50,15 @@ void main() {
         }
     }
 
-    bool inArcBody = dist >= innerRadius && dist <= outerRadius && inRange;
+    // Analytic edge coverage (see circle.frag.glsl) across the stroke's
+    // inner and outer radius and around the round caps; the angular limits
+    // stay hard because the caps cover them.
+    float radialEdge = max(fwidth(dist), 0.000001);
+    float radialAlpha = clamp((dist - innerRadius) / radialEdge + 0.5, 0.0, 1.0)
+        * clamp((outerRadius - dist) / radialEdge + 0.5, 0.0, 1.0);
+    float bodyAlpha = inRange ? radialAlpha : 0.0;
     bool hasCaps = abs(vSweepAngle) < TWO_PI - 0.001;
-    bool inCap = false;
+    float capAlpha = 0.0;
     bool inOutline = false;
     if (hasCaps) {
         float halfThickness = vThickness * 0.5;
@@ -60,8 +66,9 @@ void main() {
         vec2 endPoint = vec2(cos(vStartAngle + vSweepAngle), sin(vStartAngle + vSweepAngle)) * vRadius;
         float startDistance = length(vPosition - startPoint);
         float endDistance = length(vPosition - endPoint);
-        inCap = startDistance <= halfThickness
-            || endDistance <= halfThickness;
+        capAlpha = max(
+            clamp((halfThickness - startDistance) / max(fwidth(startDistance), 0.000001) + 0.5, 0.0, 1.0),
+            clamp((halfThickness - endDistance) / max(fwidth(endDistance), 0.000001) + 0.5, 0.0, 1.0));
         if (vOutlineThickness > 0.0) {
             float innerCapRadius = max(halfThickness - vOutlineThickness, 0.0);
             inOutline = (startDistance >= innerCapRadius && startDistance <= halfThickness)
@@ -79,10 +86,17 @@ void main() {
         inOutline = inOutline || (inRange && (nearOuter || nearInner));
     }
 
-    if ((vOutlineThickness > 0.0 && !inOutline)
-        || (vOutlineThickness <= 0.0 && !inArcBody && !inCap)) {
-        discard;
+    if (vOutlineThickness > 0.0) {
+        if (!inOutline) {
+            discard;
+        }
+        fragColor = color;
+        return;
     }
 
-    fragColor = color;
+    float alpha = max(bodyAlpha, capAlpha);
+    if (alpha <= 0.0) {
+        discard;
+    }
+    fragColor = color * alpha;
 }

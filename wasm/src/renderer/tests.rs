@@ -560,6 +560,20 @@ fn tile_inputs_reject_coordinates_beyond_exact_f32_integer_range() {
 }
 
 #[test]
+fn msaa_targets_only_sized_mask_formats() {
+    use web_sys::WebGl2RenderingContext;
+    assert_eq!(
+        Renderer::msaa_internal_format("R8"),
+        Some(WebGl2RenderingContext::R8)
+    );
+    assert_eq!(
+        Renderer::msaa_internal_format("RGBA8"),
+        Some(WebGl2RenderingContext::RGBA8)
+    );
+    assert_eq!(Renderer::msaa_internal_format("RGBA"), None);
+}
+
+#[test]
 fn path_region_bounds_come_from_the_cover_quads() {
     let cover = [
         1.0, 2.0, 5.0, 2.0, 1.0, 8.0, 1.0, 8.0, 5.0, 2.0, 5.0, 8.0, // region 0

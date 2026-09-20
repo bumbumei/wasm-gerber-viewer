@@ -7,11 +7,13 @@ in highp float vCoverage;
 uniform lowp vec4 color;
 out lowp vec4 fragColor;
 void main() {
-    float dist = dot(vPosition, vPosition);
-    if (dist > 1.0) discard;
+    // Analytic edge coverage for the disc and its hole (see circle.frag.glsl).
+    float dist = length(vPosition);
+    float alpha = clamp((1.0 - dist) / max(fwidth(dist), 0.000001) + 0.5, 0.0, 1.0);
     if (vHoleRadius > 0.0) {
-        vec2 diff = vPosition - vHoleCenter;
-        if (dot(diff, diff) < vHoleRadius * vHoleRadius) discard;
+        float holeDist = length(vPosition - vHoleCenter);
+        alpha *= clamp((holeDist - vHoleRadius) / max(fwidth(holeDist), 0.000001) + 0.5, 0.0, 1.0);
     }
-    fragColor = color * vCoverage;
+    if (alpha <= 0.0) discard;
+    fragColor = color * (vCoverage * alpha);
 }

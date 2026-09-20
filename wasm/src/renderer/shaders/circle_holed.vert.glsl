@@ -43,11 +43,14 @@ void main() {
     // Coverage scaled by the size ratio when the pad is held at the minimum
     // (see circle.vert.glsl).
     vCoverage = trueRadius > 0.0 ? trueRadius / effectiveRadius : 1.0;
-    vec2 scaledPos = position * effectiveRadius + center;
+    // Anti-aliasing fringe (see circle.vert.glsl): the quad grows by half a
+    // pixel while vPosition keeps the true radius at 1.0.
+    float safeRadius = max(effectiveRadius, 0.000000001);
+    float drawnRadius = effectiveRadius + 0.5 / pixelsPerWorld;
+    vec2 scaledPos = position * drawnRadius + center;
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
-    vPosition = position;
-    float safeRadius = max(effectiveRadius, 0.000000001);
+    vPosition = position * (drawnRadius / safeRadius);
     vHoleCenter = (vec2(hole_x_instance, hole_y_instance) - center) / safeRadius;
     vHoleRadius = hole_radius_instance / safeRadius;
 }

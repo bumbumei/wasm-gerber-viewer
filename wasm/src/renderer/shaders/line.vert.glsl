@@ -48,13 +48,17 @@ void main() {
         : 0.0;
     float outlinePixels = inner_outline_pixels + inner_outline_world * pixelsPerWorld;
     float expandedHalfWidthPixels = halfWidthPixels + outlinePixels;
-    vSide = position.y;
+    // Anti-aliasing: the body grows by half a pixel on each side so the
+    // fragment shader's soft edge has room; abs(vSide) == 1.0 stays the true
+    // edge. Round caps are drawn separately as circles.
+    float drawnHalfWidthPixels = expandedHalfWidthPixels + 0.5;
+    vSide = position.y * (drawnHalfWidthPixels / max(expandedHalfWidthPixels, 0.000001));
     vInnerSide = outlinePixels > 0.0 && expandedHalfWidthPixels > 0.000001
         ? halfWidthPixels / expandedHalfWidthPixels
         : 0.0;
 
     float t = position.x * 0.5 + 0.5;
     vec2 centerPixels = mix(startPixels, endPixels, t);
-    vec2 adjustedPixels = centerPixels + normal * position.y * expandedHalfWidthPixels;
+    vec2 adjustedPixels = centerPixels + normal * position.y * drawnHalfWidthPixels;
     gl_Position = vec4(pixelToClip(adjustedPixels), 0.0, 1.0);
 }

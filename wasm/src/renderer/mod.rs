@@ -95,9 +95,31 @@ pub struct LayerMetadata {
 }
 
 /// WebGL renderer for Gerber graphics with multi-layer support
+/// Shared multisampled render target. Every layer mask is drawn into it and
+/// resolved into the layer's own texture, so one allocation anti-aliases all
+/// layers.
+struct MsaaTarget {
+    framebuffer: WebGlFramebuffer,
+    color: web_sys::WebGlRenderbuffer,
+    depth_stencil: web_sys::WebGlRenderbuffer,
+    width: u32,
+    height: u32,
+    internal_format: u32,
+}
+
+/// Samples per pixel for the layer masks. Triangle edges (regions, macro
+/// flashes, path regions) are anti-aliased by the multisampling; discs and
+/// line bodies compute their edge coverage analytically in the fragment
+/// shader, which multisampling cannot do for a `discard`-shaped edge.
+const MSAA_SAMPLES: i32 = 4;
+
 pub struct Renderer {
     gl: WebGl2RenderingContext,
     explicit_size: Option<(u32, u32)>,
+    msaa_target: Option<MsaaTarget>,
+    /// Set once multisampled renderbuffers turn out to be unavailable, so the
+    /// masks are rendered directly from then on.
+    msaa_unavailable: bool,
     layers: Vec<Option<LayerMetadata>>, // Sparse vec (None = deallocated slot)
     composites: Vec<Option<CompositeLayerMetadata>>,
     internal_layer_ids: HashSet<usize>,
@@ -1070,6 +1092,8 @@ impl Renderer {
         Ok(Renderer {
             gl,
             explicit_size,
+            msaa_target: None,
+            msaa_unavailable: false,
             layers: Vec::new(),
             composites: Vec::new(),
             internal_layer_ids: HashSet::new(),
@@ -9002,12 +9026,42 @@ impl Renderer {
         }
 
         Self::drain_gl_errors(&self.gl);
-        let framebuffer = self.get_layer(layer_idx)?.fbo.framebuffer.clone();
-        Self::bind_draw_target(&self.gl, Some(&framebuffer));
-        self.gl.viewport(0, 0, width_i32, height_i32);
-        self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
-        self.gl.clear(COLOR_BUFFER_BIT);
-        self.render_layer_geometry(layer_idx, &transform, width, height)?;
+        let (framebuffer, color_format) = {
+            let layer = self.get_layer(layer_idx)?;
+            (layer.fbo.framebuffer.clone(), layer.fbo.color_format)
+        };
+        let msaa_framebuffer = Self::msaa_internal_format(color_format)
+            .and_then(|format| self.ensure_msaa_target(width, height, format))
+            .map(|target| target.framebuffer.clone());
+        if let Some(msaa_framebuffer) = &msaa_framebuffer {
+            self.render_layer_mask_into(layer_idx, msaa_framebuffer, &transform, width, height)?;
+            // Resolve the multisampled mask into the layer texture.
+            Self::bind_read_target(&self.gl, msaa_framebuffer);
+            Self::bind_draw_target(&self.gl, Some(&framebuffer));
+            self.gl.blit_framebuffer(
+                0,
+                0,
+                width_i32,
+                height_i32,
+                0,
+                0,
+                width_i32,
+                height_i32,
+                COLOR_BUFFER_BIT,
+                WebGl2RenderingContext::NEAREST,
+            );
+            self.gl
+                .bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, None);
+            if self.gl.get_error() != WebGl2RenderingContext::NO_ERROR {
+                // This context cannot resolve the multisampled mask; render
+                // directly from now on.
+                Self::drain_gl_errors(&self.gl);
+                self.disable_msaa();
+                self.render_layer_mask_into(layer_idx, &framebuffer, &transform, width, height)?;
+            }
+        } else {
+            self.render_layer_mask_into(layer_idx, &framebuffer, &transform, width, height)?;
+        }
         Self::check_gl_stage(&self.gl, "Gerber mask rendering")?;
 
         if let Some(layer) = &mut self.layers[layer_idx] {
@@ -9016,6 +9070,167 @@ impl Renderer {
             layer.fbo_generation = layer.fbo_generation.wrapping_add(1);
         }
         Ok(true)
+    }
+
+    fn render_layer_mask_into(
+        &mut self,
+        layer_idx: usize,
+        framebuffer: &WebGlFramebuffer,
+        transform: &[f32; 9],
+        width: u32,
+        height: u32,
+    ) -> Result<(), JsValue> {
+        let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
+        let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
+        Self::bind_draw_target(&self.gl, Some(framebuffer));
+        self.gl.viewport(0, 0, width_i32, height_i32);
+        self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        self.gl.clear(COLOR_BUFFER_BIT);
+        self.render_layer_geometry(layer_idx, transform, width, height)
+    }
+
+    /// Multisampled renderbuffer format matching a layer mask texture, or
+    /// `None` when the mask uses a format a resolve blit cannot target.
+    fn msaa_internal_format(color_format: &str) -> Option<u32> {
+        match color_format {
+            "R8" => Some(WebGl2RenderingContext::R8),
+            "RGBA8" => Some(WebGl2RenderingContext::RGBA8),
+            _ => None,
+        }
+    }
+
+    fn ensure_msaa_target(
+        &mut self,
+        width: u32,
+        height: u32,
+        internal_format: u32,
+    ) -> Option<&MsaaTarget> {
+        if self.msaa_unavailable {
+            return None;
+        }
+        let matches = self.msaa_target.as_ref().is_some_and(|target| {
+            target.width == width
+                && target.height == height
+                && target.internal_format == internal_format
+        });
+        if !matches {
+            if let Some(old) = self.msaa_target.take() {
+                Self::delete_msaa_target(&self.gl, old);
+            }
+            match Self::create_msaa_target(&self.gl, width, height, internal_format) {
+                Some(target) => self.msaa_target = Some(target),
+                None => {
+                    Self::drain_gl_errors(&self.gl);
+                    self.msaa_unavailable = true;
+                    return None;
+                }
+            }
+        }
+        self.msaa_target.as_ref()
+    }
+
+    fn disable_msaa(&mut self) {
+        if let Some(target) = self.msaa_target.take() {
+            Self::delete_msaa_target(&self.gl, target);
+        }
+        self.msaa_unavailable = true;
+    }
+
+    fn create_msaa_target(
+        gl: &WebGl2RenderingContext,
+        width: u32,
+        height: u32,
+        internal_format: u32,
+    ) -> Option<MsaaTarget> {
+        let max_samples = gl
+            .get_parameter(WebGl2RenderingContext::MAX_SAMPLES)
+            .ok()
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0) as i32;
+        let samples = MSAA_SAMPLES.min(max_samples);
+        if samples < 2 {
+            return None;
+        }
+        let width_i32 = Self::checked_u32_to_i32("MSAA width", width).ok()?;
+        let height_i32 = Self::checked_u32_to_i32("MSAA height", height).ok()?;
+        Self::drain_gl_errors(gl);
+
+        let framebuffer = gl.create_framebuffer()?;
+        let color = match gl.create_renderbuffer() {
+            Some(color) => color,
+            None => {
+                gl.delete_framebuffer(Some(&framebuffer));
+                return None;
+            }
+        };
+        let depth_stencil = match gl.create_renderbuffer() {
+            Some(depth_stencil) => depth_stencil,
+            None => {
+                gl.delete_framebuffer(Some(&framebuffer));
+                gl.delete_renderbuffer(Some(&color));
+                return None;
+            }
+        };
+        let target = MsaaTarget {
+            framebuffer,
+            color,
+            depth_stencil,
+            width,
+            height,
+            internal_format,
+        };
+
+        gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, Some(&target.color));
+        gl.renderbuffer_storage_multisample(
+            WebGl2RenderingContext::RENDERBUFFER,
+            samples,
+            internal_format,
+            width_i32,
+            height_i32,
+        );
+        gl.bind_renderbuffer(
+            WebGl2RenderingContext::RENDERBUFFER,
+            Some(&target.depth_stencil),
+        );
+        gl.renderbuffer_storage_multisample(
+            WebGl2RenderingContext::RENDERBUFFER,
+            samples,
+            WebGl2RenderingContext::DEPTH24_STENCIL8,
+            width_i32,
+            height_i32,
+        );
+        gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
+        gl.bind_framebuffer(
+            WebGl2RenderingContext::FRAMEBUFFER,
+            Some(&target.framebuffer),
+        );
+        gl.framebuffer_renderbuffer(
+            WebGl2RenderingContext::FRAMEBUFFER,
+            WebGl2RenderingContext::COLOR_ATTACHMENT0,
+            WebGl2RenderingContext::RENDERBUFFER,
+            Some(&target.color),
+        );
+        gl.framebuffer_renderbuffer(
+            WebGl2RenderingContext::FRAMEBUFFER,
+            WebGl2RenderingContext::DEPTH_STENCIL_ATTACHMENT,
+            WebGl2RenderingContext::RENDERBUFFER,
+            Some(&target.depth_stencil),
+        );
+        let status = gl.check_framebuffer_status(WebGl2RenderingContext::FRAMEBUFFER);
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+        if status != WebGl2RenderingContext::FRAMEBUFFER_COMPLETE
+            || gl.get_error() != WebGl2RenderingContext::NO_ERROR
+        {
+            Self::delete_msaa_target(gl, target);
+            return None;
+        }
+        Some(target)
+    }
+
+    fn delete_msaa_target(gl: &WebGl2RenderingContext, target: MsaaTarget) {
+        gl.delete_framebuffer(Some(&target.framebuffer));
+        gl.delete_renderbuffer(Some(&target.color));
+        gl.delete_renderbuffer(Some(&target.depth_stencil));
     }
 
     fn render_composite_fbo(
@@ -9612,6 +9827,9 @@ impl Renderer {
         }
 
         let replacements = pending_fbos.commit();
+        if let Some(target) = self.msaa_target.take() {
+            Self::delete_msaa_target(&self.gl, target);
+        }
         if self.explicit_size.is_some() {
             self.explicit_size = Some((width, height));
         }
@@ -9714,6 +9932,10 @@ impl Renderer {
         let (programs, quad_buffer, fullscreen_vertex_array, new_fbos) = pending.commit();
 
         let old_gl = self.gl.clone();
+        // The multisample target belonged to the lost context; try again on
+        // the new one.
+        self.msaa_target = None;
+        self.msaa_unavailable = false;
         let old_programs = std::mem::replace(&mut self.programs, programs);
         let old_quad_buffer = std::mem::replace(&mut self.quad_buffer, quad_buffer);
         let old_fullscreen_vertex_array =
@@ -9774,6 +9996,9 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
+        if let Some(target) = self.msaa_target.take() {
+            Self::delete_msaa_target(&self.gl, target);
+        }
         self.clear_all();
         self.delete_highlight_resources();
         self.gl
@@ -9783,8 +10008,6 @@ impl Drop for Renderer {
     }
 }
 
-/// Bounding box of interleaved x/y vertices: `(min_x, min_y, max_x, max_y)`,
-/// or `None` when empty or any coordinate is not finite.
 /// One `[min_x, min_y, max_x, max_y]` per path region from its cover quad,
 /// whose six vertices start `min,min / max,min / min,max`.
 fn path_region_bounds_from_cover_quads(cover_vertices: &[f32]) -> Vec<[f32; 4]> {
@@ -9794,6 +10017,8 @@ fn path_region_bounds_from_cover_quads(cover_vertices: &[f32]) -> Vec<[f32; 4]> 
         .collect()
 }
 
+/// Bounding box of interleaved x/y vertices: `(min_x, min_y, max_x, max_y)`,
+/// or `None` when empty or any coordinate is not finite.
 fn vertex_bounds(vertices: &[f32]) -> Option<[f32; 4]> {
     let (mut min_x, mut max_x, mut min_y, mut max_y) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
     for pair in vertices.chunks_exact(2) {
