@@ -169,8 +169,17 @@ impl ShaderPrograms {
                 "hole_x_instance",
                 "hole_y_instance",
                 "hole_radius_instance",
+                "region_center_x",
+                "region_center_y",
+                "region_half_width",
+                "region_half_height",
             ],
-            &["transform", "color"],
+            &[
+                "transform",
+                "color",
+                "viewport_size",
+                "minimum_feature_pixels",
+            ],
         )?;
         pending.track(&triangle);
 
@@ -184,7 +193,7 @@ impl ShaderPrograms {
                 "color",
                 "viewport_size",
                 "minimum_feature_pixels",
-                "template_half_extent",
+                "template_half_size",
             ],
         )?;
         pending.track(&triangle_template);
@@ -310,7 +319,14 @@ impl ShaderPrograms {
             PATH_SOLID_VERTEX_SHADER,
             PATH_SOLID_FRAGMENT_SHADER,
             &["position"],
-            &["transform", "color"],
+            &[
+                "transform",
+                "color",
+                "viewport_size",
+                "minimum_feature_pixels",
+                "region_center",
+                "region_half_size",
+            ],
         )?;
         pending.track(&path_solid);
 
@@ -319,7 +335,13 @@ impl ShaderPrograms {
             PATH_SECTOR_VERTEX_SHADER,
             PATH_SECTOR_FRAGMENT_SHADER,
             &["position", "center", "radius"],
-            &["transform"],
+            &[
+                "transform",
+                "viewport_size",
+                "minimum_feature_pixels",
+                "region_center",
+                "region_half_size",
+            ],
         )?;
         pending.track(&path_sector);
 

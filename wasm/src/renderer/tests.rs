@@ -560,17 +560,71 @@ fn tile_inputs_reject_coordinates_beyond_exact_f32_integer_range() {
 }
 
 #[test]
-fn template_half_extent_is_half_the_narrow_side() {
-    // A 2 x 0.4 rectangle as two triangles: the narrow side decides.
+fn path_region_bounds_come_from_the_cover_quads() {
+    let cover = [
+        1.0, 2.0, 5.0, 2.0, 1.0, 8.0, 1.0, 8.0, 5.0, 2.0, 5.0, 8.0, // region 0
+        -3.0, -1.0, -2.0, -1.0, -3.0, 0.5, -3.0, 0.5, -2.0, -1.0, -2.0, 0.5, // region 1
+    ];
+    assert_eq!(
+        super::path_region_bounds_from_cover_quads(&cover),
+        vec![[1.0, 2.0, 5.0, 8.0], [-3.0, -1.0, -2.0, 0.5]]
+    );
+    assert!(super::path_region_bounds_from_cover_quads(&cover[..11]).is_empty());
+}
+
+#[test]
+fn triangle_bounds_half_size_follows_the_bounding_box() {
+    // A 2 x 0.4 rectangle as two triangles.
     let thin = [
         -1.0, -0.2, 1.0, -0.2, 1.0, 0.2, //
         -1.0, -0.2, 1.0, 0.2, -1.0, 0.2,
     ];
-    assert!((template_half_extent(&thin) - 0.2).abs() < 1e-6);
-    let square = [
-        -0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, 0.5,
+    let [hw, hh] = triangle_bounds_half_size(&thin);
+    assert!((hw - 1.0).abs() < 1e-6 && (hh - 0.2).abs() < 1e-6);
+    assert_eq!(triangle_bounds_half_size(&[]), [0.0, 0.0]);
+    assert_eq!(
+        triangle_bounds_half_size(&[0.0, f32::NAN, 1.0, 1.0]),
+        [0.0, 0.0]
+    );
+}
+
+#[test]
+fn triangle_region_attributes_group_touching_triangles_into_one_shape() {
+    // A fan of three slivers around (10, 20) (a tessellated pad), then a
+    // separate quad at (30, 30) made of two triangles sharing an edge.
+    let vertices = [
+        10.0, 20.0, 11.0, 20.0, 11.0, 21.0, //
+        10.0, 20.0, 11.0, 21.0, 10.0, 21.0, //
+        10.0, 20.0, 10.0, 21.0, 9.0, 21.0, //
+        30.0, 30.0, 32.0, 30.0, 32.0, 34.0, //
+        30.0, 30.0, 32.0, 34.0, 30.0, 34.0,
     ];
-    assert!((template_half_extent(&square) - 0.5).abs() < 1e-6);
-    assert_eq!(template_half_extent(&[]), 0.0);
-    assert_eq!(template_half_extent(&[0.0, f32::NAN, 1.0, 1.0]), 0.0);
+    let region = triangle_region_attributes(&vertices);
+    assert_eq!(region.center_x.len(), 15);
+    // The fan spans x 9..11, y 20..21 as one shape.
+    assert!(region.center_x[..9]
+        .iter()
+        .all(|v| (*v - 10.0).abs() < 1e-6));
+    assert!(region.center_y[..9]
+        .iter()
+        .all(|v| (*v - 20.5).abs() < 1e-6));
+    assert!(region.half_width[..9]
+        .iter()
+        .all(|v| (*v - 1.0).abs() < 1e-6));
+    assert!(region.half_height[..9]
+        .iter()
+        .all(|v| (*v - 0.5).abs() < 1e-6));
+    // The quad is its own shape: 2 x 4 about (31, 32).
+    assert!(region.center_x[9..]
+        .iter()
+        .all(|v| (*v - 31.0).abs() < 1e-6));
+    assert!(region.half_width[9..]
+        .iter()
+        .all(|v| (*v - 1.0).abs() < 1e-6));
+    assert!(region.half_height[9..]
+        .iter()
+        .all(|v| (*v - 2.0).abs() < 1e-6));
+    // Degenerate input scales by 1.
+    let sliver = triangle_region_attributes(&[0.0, 0.0, f32::NAN, 1.0, 1.0, 1.0]);
+    assert_eq!(sliver.half_width, vec![0.0, 0.0, 0.0]);
 }

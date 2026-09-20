@@ -3106,6 +3106,38 @@ impl Renderer {
                 )?);
         }
 
+        // Per-triangle bounding boxes for the minimum-visibility clamp,
+        // computed once from the payload vertices.
+        let region = triangle_region_attributes(&vertices.to_vec());
+        buffer_cache.triangle_region_center_x_buffer = Some(Self::create_instance_buffer(
+            &self.gl,
+            &region.center_x,
+            &self.programs.triangle,
+            "region_center_x",
+            0,
+        )?);
+        buffer_cache.triangle_region_center_y_buffer = Some(Self::create_instance_buffer(
+            &self.gl,
+            &region.center_y,
+            &self.programs.triangle,
+            "region_center_y",
+            0,
+        )?);
+        buffer_cache.triangle_region_half_width_buffer = Some(Self::create_instance_buffer(
+            &self.gl,
+            &region.half_width,
+            &self.programs.triangle,
+            "region_half_width",
+            0,
+        )?);
+        buffer_cache.triangle_region_half_height_buffer = Some(Self::create_instance_buffer(
+            &self.gl,
+            &region.half_height,
+            &self.programs.triangle,
+            "region_half_height",
+            0,
+        )?);
+
         self.gl.bind_vertex_array(None);
         Ok(())
     }
@@ -3707,6 +3739,8 @@ impl Renderer {
                 ));
             }
             Self::validate_js_finite_array("path region cover vertices", &cover_vertices)?;
+            buffer_cache.path_region_bounds =
+                path_region_bounds_from_cover_quads(&cover_vertices.to_vec());
             let vao = self
                 .gl
                 .create_vertex_array()
@@ -4718,6 +4752,17 @@ impl Renderer {
         if let Some(buf) = cache.triangle_hole_radius_buffer {
             gl.delete_buffer(Some(&buf));
         }
+        for buf in [
+            cache.triangle_region_center_x_buffer,
+            cache.triangle_region_center_y_buffer,
+            cache.triangle_region_half_width_buffer,
+            cache.triangle_region_half_height_buffer,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            gl.delete_buffer(Some(&buf));
+        }
         for template_cache in cache.triangle_template_caches {
             if let Some(vao) = template_cache.vao {
                 gl.delete_vertex_array(Some(&vao));
@@ -4873,6 +4918,7 @@ impl Renderer {
         cache.path_sector_vertex_count = 0;
         cache.path_cover_vertex_count = 0;
         cache.path_clear_vertex_count = 0;
+        cache.path_region_bounds = Vec::new();
     }
 
     fn path_region_cache_complete(cache: &BufferCache, path_regions: &PathRegions) -> bool {
@@ -4894,6 +4940,7 @@ impl Renderer {
 
         cache.path_cover_vao.is_some()
             && cache.path_clear_vao.is_some()
+            && cache.path_region_bounds.len() == path_regions.region_count()
             && (!needs_wedge_cache || cache.path_wedge_vao.is_some())
             && (!needs_sector_cache || cache.path_sector_vao.is_some())
     }
@@ -4911,6 +4958,7 @@ impl Renderer {
         cache.path_clear_vao = built_cache.path_clear_vao.take();
         cache.path_clear_vertex_count = built_cache.path_clear_vertex_count;
         cache.path_clear_vertex_buffer = built_cache.path_clear_vertex_buffer.take();
+        cache.path_region_bounds = std::mem::take(&mut built_cache.path_region_bounds);
     }
 
     fn create_fbo(
@@ -5970,6 +6018,7 @@ impl Renderer {
                 buffer_cache.path_clear_vao.as_ref(),
                 quad_start,
                 6,
+                None,
             )?;
 
             self.gl.stencil_mask(0x02);
@@ -5991,6 +6040,7 @@ impl Renderer {
                     buffer_cache.path_wedge_vao.as_ref(),
                     wedge_start,
                     wedge_end - wedge_start,
+                    None,
                 )?;
             }
 
@@ -6008,6 +6058,7 @@ impl Renderer {
                     buffer_cache,
                     sector_start,
                     sector_end - sector_start,
+                    None,
                 )?;
             }
 
@@ -6025,6 +6076,7 @@ impl Renderer {
                 buffer_cache.path_cover_vao.as_ref(),
                 quad_start,
                 6,
+                None,
             )?;
 
             self.gl.stencil_mask(0x02);
@@ -6036,6 +6088,7 @@ impl Renderer {
                 buffer_cache.path_clear_vao.as_ref(),
                 quad_start,
                 6,
+                None,
             )?;
         }
 
@@ -6201,6 +6254,8 @@ impl Renderer {
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
+        viewport_width: u32,
+        viewport_height: u32,
     ) -> Result<(), JsValue> {
         // Validate layer exists
         if layer_id >= self.layers.len() {
@@ -6289,6 +6344,24 @@ impl Renderer {
                     pending_cache.cache.triangle_hole_radius_buffer = Some(hole_radius_buffer);
                 }
 
+                // Per-triangle bounding boxes for the minimum-visibility clamp.
+                let region = triangle_region_attributes(&triangles.vertices);
+                for (data, name, slot) in [
+                    (&region.center_x, "region_center_x", 0usize),
+                    (&region.center_y, "region_center_y", 1),
+                    (&region.half_width, "region_half_width", 2),
+                    (&region.half_height, "region_half_height", 3),
+                ] {
+                    let buffer = Self::create_instance_buffer(&self.gl, data, program, name, 0)?;
+                    let cache = &mut pending_cache.cache;
+                    *match slot {
+                        0 => &mut cache.triangle_region_center_x_buffer,
+                        1 => &mut cache.triangle_region_center_y_buffer,
+                        2 => &mut cache.triangle_region_half_width_buffer,
+                        _ => &mut cache.triangle_region_half_height_buffer,
+                    } = Some(buffer);
+                }
+
                 // Unbind VAO
                 self.gl.bind_vertex_array(None);
                 let mut built_cache = pending_cache.commit();
@@ -6302,6 +6375,14 @@ impl Renderer {
                 buffer_cache.triangle_hole_y_buffer = built_cache.triangle_hole_y_buffer.take();
                 buffer_cache.triangle_hole_radius_buffer =
                     built_cache.triangle_hole_radius_buffer.take();
+                buffer_cache.triangle_region_center_x_buffer =
+                    built_cache.triangle_region_center_x_buffer.take();
+                buffer_cache.triangle_region_center_y_buffer =
+                    built_cache.triangle_region_center_y_buffer.take();
+                buffer_cache.triangle_region_half_width_buffer =
+                    built_cache.triangle_region_half_width_buffer.take();
+                buffer_cache.triangle_region_half_height_buffer =
+                    built_cache.triangle_region_half_height_buffer.take();
                 layer.gerber_data[sublayer_idx]
                     .triangles
                     .release_cpu_geometry();
@@ -6335,6 +6416,13 @@ impl Renderer {
         if let Some(loc) = program.uniforms.get("color") {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
         }
+        self.set_view_feature_uniforms(
+            program,
+            viewport_width,
+            viewport_height,
+            layer.inner_outline_pixels,
+            layer.inner_outline_world,
+        );
 
         // Draw
         self.gl.draw_arrays(TRIANGLES, 0, vertex_count);
@@ -6399,7 +6487,7 @@ impl Renderer {
                         "triangle template instance count",
                         template.instance_x.len(),
                     )?;
-                    let half_extent = template_half_extent(&template.vertices);
+                    let half_size = triangle_bounds_half_size(&template.vertices);
                     let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
                     pending_cache
                         .cache
@@ -6455,7 +6543,7 @@ impl Renderer {
                     template_cache.vao = built_template_cache.vao.take();
                     template_cache.vertex_count = vertex_count;
                     template_cache.instance_count = instance_count;
-                    template_cache.half_extent = half_extent;
+                    template_cache.half_size = half_size;
                     template_cache.vertex_buffer = built_template_cache.vertex_buffer.take();
                     template_cache.instance_x_buffer =
                         built_template_cache.instance_x_buffer.take();
@@ -6488,8 +6576,12 @@ impl Renderer {
             if let Some(loc) = program.uniforms.get("color") {
                 self.gl.uniform4fv_with_f32_array(Some(loc), color);
             }
-            if let Some(loc) = program.uniforms.get("template_half_extent") {
-                self.gl.uniform1f(Some(loc), template_cache.half_extent);
+            if let Some(loc) = program.uniforms.get("template_half_size") {
+                self.gl.uniform2f(
+                    Some(loc),
+                    template_cache.half_size[0],
+                    template_cache.half_size[1],
+                );
             }
             self.set_view_feature_uniforms(
                 program,
@@ -7098,6 +7190,8 @@ impl Renderer {
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
+        viewport_width: u32,
+        viewport_height: u32,
     ) -> Result<(), JsValue> {
         let region_count = {
             let layer = self.layers[layer_id]
@@ -7136,6 +7230,14 @@ impl Renderer {
         let layer = self.get_layer(layer_id)?;
         let path_regions = &layer.gerber_data[sublayer_idx].path_regions;
         let buffer_cache = &layer.buffer_caches[sublayer_idx];
+        if buffer_cache.path_region_bounds.len() != region_count {
+            return Err(JsValue::from_str("Path region bounds cache is incomplete"));
+        }
+
+        for program in [&self.programs.path_solid, &self.programs.path_sector] {
+            self.gl.use_program(Some(&program.program));
+            self.set_view_feature_uniforms(program, viewport_width, viewport_height, 0.0, 0.0);
+        }
 
         self.gl.enable(STENCIL_TEST);
         self.gl.stencil_mask(0xff);
@@ -7144,6 +7246,7 @@ impl Renderer {
 
         let result = (|| {
             for region_idx in 0..region_count {
+                let region_bounds = Some(&buffer_cache.path_region_bounds[region_idx]);
                 self.gl.color_mask(false, false, false, false);
                 self.gl.stencil_func(ALWAYS, 0, 0xff);
                 self.gl.stencil_op(KEEP, KEEP, INVERT);
@@ -7163,6 +7266,7 @@ impl Renderer {
                         buffer_cache.path_wedge_vao.as_ref(),
                         wedge_start,
                         wedge_end - wedge_start,
+                        region_bounds,
                     )?;
                 }
 
@@ -7180,6 +7284,7 @@ impl Renderer {
                         buffer_cache,
                         sector_start,
                         sector_end - sector_start,
+                        region_bounds,
                     )?;
                 }
 
@@ -7193,6 +7298,7 @@ impl Renderer {
                     buffer_cache.path_clear_vao.as_ref(),
                     Self::checked_path_region_quad_start(region_idx)?,
                     6,
+                    region_bounds,
                 )?;
 
                 self.gl.color_mask(false, false, false, false);
@@ -7204,6 +7310,7 @@ impl Renderer {
                     buffer_cache.path_clear_vao.as_ref(),
                     Self::checked_path_region_quad_start(region_idx)?,
                     6,
+                    region_bounds,
                 )?;
             }
 
@@ -7260,6 +7367,8 @@ impl Renderer {
             buffer_cache.path_sector_vertex_buffer = Some(buffer);
         }
 
+        buffer_cache.path_region_bounds =
+            path_region_bounds_from_cover_quads(&path_regions.cover_vertices);
         if !path_regions.cover_vertices.is_empty() {
             buffer_cache.path_cover_vertex_count = Self::checked_usize_to_i32(
                 "path region cover vertex count",
@@ -7377,6 +7486,25 @@ impl Renderer {
         Ok(())
     }
 
+    /// Point the path shaders at the region being drawn: its centre and
+    /// half size drive the minimum feature width scaling. `None` (used by
+    /// the highlight passes) disables the scaling for the draw.
+    fn set_path_region_uniforms(&self, program: &ShaderProgram, region_bounds: Option<&[f32; 4]>) {
+        let (center, half_size) = match region_bounds {
+            Some([min_x, min_y, max_x, max_y]) => (
+                [(min_x + max_x) * 0.5, (min_y + max_y) * 0.5],
+                [(max_x - min_x) * 0.5, (max_y - min_y) * 0.5],
+            ),
+            None => ([0.0, 0.0], [0.0, 0.0]),
+        };
+        if let Some(loc) = program.uniforms.get("region_center") {
+            self.gl.uniform2f(Some(loc), center[0], center[1]);
+        }
+        if let Some(loc) = program.uniforms.get("region_half_size") {
+            self.gl.uniform2f(Some(loc), half_size[0], half_size[1]);
+        }
+    }
+
     fn draw_path_solid_range(
         &self,
         transform: &[f32; 9],
@@ -7384,6 +7512,7 @@ impl Renderer {
         vao: Option<&web_sys::WebGlVertexArrayObject>,
         start: i32,
         count: i32,
+        region_bounds: Option<&[f32; 4]>,
     ) -> Result<(), JsValue> {
         if count <= 0 {
             return Ok(());
@@ -7401,6 +7530,7 @@ impl Renderer {
         if let Some(loc) = program.uniforms.get("color") {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
         }
+        self.set_path_region_uniforms(program, region_bounds);
         self.gl.draw_arrays(TRIANGLES, start, count);
         Ok(())
     }
@@ -7411,6 +7541,7 @@ impl Renderer {
         buffer_cache: &BufferCache,
         start: i32,
         count: i32,
+        region_bounds: Option<&[f32; 4]>,
     ) -> Result<(), JsValue> {
         if count <= 0 {
             return Ok(());
@@ -7425,6 +7556,7 @@ impl Renderer {
             self.gl
                 .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
         }
+        self.set_path_region_uniforms(program, region_bounds);
         self.gl.draw_arrays(TRIANGLES, start, count);
         Ok(())
     }
@@ -7451,26 +7583,43 @@ impl Renderer {
             let is_negative = self.get_layer(layer_id)?.gerber_data[sublayer_idx].is_negative;
             let mask_in_red = self.get_layer(layer_id)?.mask_in_red;
 
-            // Set polarity blending mode
+            // Set polarity blending mode. Positive coverage combines as a
+            // union (MAX): a pixel is as covered as the most covering piece on
+            // it. Full-size geometry tiles its pixels, so the result is the
+            // same as adding, but the pieces of one pad held at the minimum
+            // feature width (or neighbouring enlarged pads) overlap inside a
+            // pixel and must not add up past their own coverage. Negative
+            // polarity keeps the additive erase.
             self.gl.enable(BLEND);
             if mask_in_red && is_negative {
                 // Internal outline masks use R8, so polarity is accumulated in
                 // red rather than alpha. Clear coverage erases destination red.
                 self.gl.blend_func(ZERO, ONE_MINUS_SRC_ALPHA);
+                self.gl.blend_equation(FUNC_ADD);
             } else if mask_in_red {
                 self.gl.blend_func(ONE, ONE);
+                self.gl.blend_equation(WebGl2RenderingContext::MAX);
             } else if is_negative {
                 // Negative polarity: erase alpha
                 self.gl
                     .blend_func_separate(ZERO, ONE, ZERO, ONE_MINUS_SRC_ALPHA);
+                self.gl.blend_equation(FUNC_ADD);
             } else {
-                // Positive polarity: add alpha
+                // Positive polarity: colour untouched, alpha is the coverage
                 self.gl.blend_func_separate(ZERO, ONE, ONE, ONE);
+                self.gl
+                    .blend_equation_separate(FUNC_ADD, WebGl2RenderingContext::MAX);
             }
-            self.gl.blend_equation(FUNC_ADD);
 
             // Render all shapes (empty checks done inside draw methods)
-            self.draw_instanced_triangles(transform, &white_color, layer_id, sublayer_idx)?;
+            self.draw_instanced_triangles(
+                transform,
+                &white_color,
+                layer_id,
+                sublayer_idx,
+                viewport_width,
+                viewport_height,
+            )?;
             self.draw_instanced_triangle_templates(
                 transform,
                 &white_color,
@@ -7504,9 +7653,17 @@ impl Renderer {
                 viewport_height,
             )?;
             self.draw_instanced_thermals(transform, &white_color, layer_id, sublayer_idx)?;
-            self.draw_path_regions(transform, &white_color, layer_id, sublayer_idx)?;
+            self.draw_path_regions(
+                transform,
+                &white_color,
+                layer_id,
+                sublayer_idx,
+                viewport_width,
+                viewport_height,
+            )?;
         }
 
+        self.gl.blend_equation(FUNC_ADD);
         self.gl.disable(BLEND);
         Ok(())
     }
@@ -9625,27 +9782,111 @@ impl Drop for Renderer {
     }
 }
 
-/// Half of the smaller bounding-box side of a triangle template (interleaved
-/// x/y vertices in world units). This is the template's narrowest dimension,
-/// which the minimum-visibility clamp compares with the pixel minimum, so a
-/// thin rectangular pad is held at the same on-screen width as a line of the
-/// same thickness. Zero for empty or non-finite input.
-fn template_half_extent(vertices: &[f32]) -> f32 {
+/// Bounding box of interleaved x/y vertices: `(min_x, min_y, max_x, max_y)`,
+/// or `None` when empty or any coordinate is not finite.
+/// One `[min_x, min_y, max_x, max_y]` per path region from its cover quad,
+/// whose six vertices start `min,min / max,min / min,max`.
+fn path_region_bounds_from_cover_quads(cover_vertices: &[f32]) -> Vec<[f32; 4]> {
+    cover_vertices
+        .chunks_exact(12)
+        .map(|quad| [quad[0], quad[1], quad[2], quad[5]])
+        .collect()
+}
+
+fn vertex_bounds(vertices: &[f32]) -> Option<[f32; 4]> {
     let (mut min_x, mut max_x, mut min_y, mut max_y) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
     for pair in vertices.chunks_exact(2) {
         let (x, y) = (pair[0], pair[1]);
         if !x.is_finite() || !y.is_finite() {
-            return 0.0;
+            return None;
         }
         min_x = min_x.min(x);
         max_x = max_x.max(x);
         min_y = min_y.min(y);
         max_y = max_y.max(y);
     }
-    if min_x > max_x || min_y > max_y {
-        return 0.0;
+    (min_x <= max_x && min_y <= max_y).then_some([min_x, min_y, max_x, max_y])
+}
+
+/// Half size of the bounding box of a triangle template (world units), which
+/// the minimum-visibility clamp compares with the pixel minimum per axis.
+/// Zero for empty or non-finite input.
+fn triangle_bounds_half_size(vertices: &[f32]) -> [f32; 2] {
+    match vertex_bounds(vertices) {
+        Some([min_x, min_y, max_x, max_y]) => [(max_x - min_x) * 0.5, (max_y - min_y) * 0.5],
+        None => [0.0, 0.0],
     }
-    ((max_x - min_x).min(max_y - min_y) * 0.5).max(0.0)
+}
+
+/// Per-vertex bounding-box attributes of the *shape* each triangle belongs to,
+/// for the minimum-visibility clamp of filled regions.
+///
+/// Triangulation writes the triangles of one contour (or one flashed
+/// aperture) consecutively, and they share vertices with each other: the
+/// fan of a tessellated round pad shares its centre, the two halves of a
+/// rectangle share an edge. So consecutive triangles that share a vertex
+/// position are grouped into one shape and every vertex of the group gets
+/// the group's bounding box. Scaling a whole pad about one centre keeps its
+/// pieces together; scaling every sliver on its own would spread them out
+/// and count their coverage once per sliver.
+struct TriangleRegionAttributes {
+    center_x: Vec<f32>,
+    center_y: Vec<f32>,
+    half_width: Vec<f32>,
+    half_height: Vec<f32>,
+}
+
+fn triangle_region_attributes(vertices: &[f32]) -> TriangleRegionAttributes {
+    let vertex_count = vertices.len() / 2;
+    let mut region = TriangleRegionAttributes {
+        center_x: Vec::with_capacity(vertex_count),
+        center_y: Vec::with_capacity(vertex_count),
+        half_width: Vec::with_capacity(vertex_count),
+        half_height: Vec::with_capacity(vertex_count),
+    };
+    let push_group = |region: &mut TriangleRegionAttributes, group: &[f32]| {
+        let (cx, cy, hw, hh) = match vertex_bounds(group) {
+            Some([min_x, min_y, max_x, max_y]) => (
+                (min_x + max_x) * 0.5,
+                (min_y + max_y) * 0.5,
+                (max_x - min_x) * 0.5,
+                (max_y - min_y) * 0.5,
+            ),
+            // Degenerate input keeps its own geometry (scale stays 1).
+            None => (0.0, 0.0, 0.0, 0.0),
+        };
+        for _ in 0..group.len() / 2 {
+            region.center_x.push(cx);
+            region.center_y.push(cy);
+            region.half_width.push(hw);
+            region.half_height.push(hh);
+        }
+    };
+    let key = |x: f32, y: f32| (x.to_bits(), y.to_bits());
+    let mut group_start = 0usize;
+    let mut group_vertices: HashSet<(u32, u32)> = HashSet::new();
+    let mut offset = 0usize;
+    while offset + 6 <= vertices.len() {
+        let triangle = &vertices[offset..offset + 6];
+        let corners = [
+            key(triangle[0], triangle[1]),
+            key(triangle[2], triangle[3]),
+            key(triangle[4], triangle[5]),
+        ];
+        let touches =
+            group_vertices.is_empty() || corners.iter().any(|c| group_vertices.contains(c));
+        if !touches {
+            push_group(&mut region, &vertices[group_start..offset]);
+            group_start = offset;
+            group_vertices.clear();
+        }
+        group_vertices.extend(corners);
+        offset += 6;
+    }
+    if group_start < vertices.len() {
+        push_group(&mut region, &vertices[group_start..]);
+    }
+    region
 }
 
 #[cfg(test)]

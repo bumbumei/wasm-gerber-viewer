@@ -17,9 +17,9 @@ pub struct TriangleTemplateBufferCache {
     pub vao: Option<WebGlVertexArrayObject>,
     pub vertex_count: i32,
     pub instance_count: i32,
-    /// Half of the template's smaller bounding-box side (world units), used
-    /// by the minimum-visibility clamp once the CPU geometry is released.
-    pub half_extent: f32,
+    /// Half size of the template's bounding box (world units), used by the
+    /// minimum-visibility clamp once the CPU geometry is released.
+    pub half_size: [f32; 2],
     pub vertex_buffer: Option<WebGlBuffer>,
     pub instance_x_buffer: Option<WebGlBuffer>,
     pub instance_y_buffer: Option<WebGlBuffer>,
@@ -35,6 +35,11 @@ pub struct BufferCache {
     pub triangle_hole_x_buffer: Option<WebGlBuffer>,
     pub triangle_hole_y_buffer: Option<WebGlBuffer>,
     pub triangle_hole_radius_buffer: Option<WebGlBuffer>,
+    // Per-vertex bounding box of each triangle (minimum-visibility clamp)
+    pub triangle_region_center_x_buffer: Option<WebGlBuffer>,
+    pub triangle_region_center_y_buffer: Option<WebGlBuffer>,
+    pub triangle_region_half_width_buffer: Option<WebGlBuffer>,
+    pub triangle_region_half_height_buffer: Option<WebGlBuffer>,
     pub triangle_template_caches: Vec<TriangleTemplateBufferCache>,
 
     // Lines cache
@@ -89,4 +94,8 @@ pub struct BufferCache {
     pub path_clear_vao: Option<WebGlVertexArrayObject>,
     pub path_clear_vertex_count: i32,
     pub path_clear_vertex_buffer: Option<WebGlBuffer>,
+    /// `[min_x, min_y, max_x, max_y]` per path region, kept after the CPU
+    /// geometry is released so the minimum feature width can scale each
+    /// region about its own centre.
+    pub path_region_bounds: Vec<[f32; 4]>,
 }

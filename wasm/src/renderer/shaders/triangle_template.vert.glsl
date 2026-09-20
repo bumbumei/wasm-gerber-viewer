@@ -6,8 +6,8 @@ in float instance_y;
 uniform mat3 transform;
 uniform vec2 viewport_size;
 uniform float minimum_feature_pixels;
-// Half of the template's smaller bounding-box side, in world units.
-uniform float template_half_extent;
+// Half size of the template's bounding box, in world units.
+uniform vec2 template_half_size;
 out highp float vCoverage;
 
 // The smallest on-screen scale of the current transform, in pixels per world
@@ -25,21 +25,27 @@ float weakestPixelsPerWorld() {
     return sqrt(weakestScaleSquared);
 }
 
+// Minimum visibility for a filled shape: how much each bounding-box axis has
+// to grow so the shape is at least sqrt(2)/2 px across (the smallest size that
+// always contains a pixel centre) or the chosen minimum, whichever is larger.
+// Each axis is scaled on its own, so a thin bar only widens and never grows
+// along its length. Returns 1.0 on an axis that is already large enough.
+vec2 minimumScale(vec2 halfSize, float pixelsPerWorld) {
+    if (minimum_feature_pixels <= 0.0) return vec2(1.0);
+    float minimumHalf = max(0.5 * minimum_feature_pixels, 0.70710678) / pixelsPerWorld;
+    return vec2(
+        halfSize.x > 0.000001 ? max(1.0, minimumHalf / halfSize.x) : 1.0,
+        halfSize.y > 0.000001 ? max(1.0, minimumHalf / halfSize.y) : 1.0);
+}
+
 void main() {
-    // Minimum visibility: when the flashed shape would be narrower than the
-    // chosen number of pixels, the whole template is scaled up about its
-    // flash point so the pad stays visible. As for circles, the floor is
-    // sqrt(2)/2 px so the shape always contains a pixel centre.
+    // Minimum visibility: a flashed template narrower than the minimum is
+    // scaled up about its flash point, each axis on its own, so the pad
+    // stays visible without a thin shape growing along its length.
     float pixelsPerWorld = max(weakestPixelsPerWorld(), 0.000001);
-    float minimumHalfExtent = minimum_feature_pixels > 0.0
-        ? max(0.5 * minimum_feature_pixels, 0.70710678) / pixelsPerWorld
-        : 0.0;
-    float scale = template_half_extent > 0.000001
-        ? max(1.0, minimumHalfExtent / template_half_extent)
-        : 1.0;
-    // Coverage scaled by the size ratio of the enlargement (see circle.vert.glsl).
-    vCoverage = 1.0 / scale;
+    vec2 scale = minimumScale(template_half_size, pixelsPerWorld);
     vec2 worldPosition = position * scale + vec2(instance_x, instance_y);
     vec3 transformed = transform * vec3(worldPosition, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
+    vCoverage = 1.0 / sqrt(scale.x * scale.y);
 }
