@@ -62,6 +62,7 @@ const TAR_GZ_EXTENSIONS = [".tar.gz", ".tgz"];
 const GENERIC_GERBER_EXTENSIONS = [
   ".art",
   ".gbr",
+  ".gbx",
   ".gdo",
   ".ger",
   ".phd",
