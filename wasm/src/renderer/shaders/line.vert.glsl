@@ -14,6 +14,8 @@ uniform float inner_outline_pixels;
 uniform float inner_outline_world;
 out highp float vSide;
 out highp float vInnerSide;
+// Change of vSide across one pixel (see circle.vert.glsl).
+out highp float vEdgeWidth;
 
 vec2 clipToPixel(vec2 clipPosition) {
     return clipPosition * viewport_size * 0.5;
@@ -54,6 +56,7 @@ void main() {
     // edge. Round caps are drawn separately as circles.
     float drawnHalfWidthPixels = expandedHalfWidthPixels + (anti_aliasing > 0.5 ? 0.5 : 0.0);
     vSide = position.y * (drawnHalfWidthPixels / max(expandedHalfWidthPixels, 0.000001));
+    vEdgeWidth = 1.0 / max(expandedHalfWidthPixels, 0.000001);
     vInnerSide = outlinePixels > 0.0 && expandedHalfWidthPixels > 0.000001
         ? halfWidthPixels / expandedHalfWidthPixels
         : 0.0;

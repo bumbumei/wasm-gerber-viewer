@@ -19,6 +19,8 @@ out highp float vStartAngle;
 out highp float vSweepAngle;
 out highp float vThickness;
 out highp float vOutlineThickness;
+// World units per pixel (see circle.vert.glsl).
+out highp float vWorldPerPixel;
 
 float weakestPixelsPerWorld() {
     vec2 pixelScale = viewport_size * 0.5;
@@ -50,6 +52,7 @@ void main() {
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
     vPosition = position * drawnRadius;
+    vWorldPerPixel = 1.0 / max(pixelsPerWorld, 0.000001);
     vRadius = radius_instance;
     vStartAngle = startAngle_instance;
     vSweepAngle = sweepAngle_instance;

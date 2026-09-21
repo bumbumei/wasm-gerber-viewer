@@ -6,6 +6,7 @@ in highp float vStartAngle;
 in highp float vSweepAngle;
 in highp float vThickness;
 in highp float vOutlineThickness;
+in highp float vWorldPerPixel;
 uniform lowp vec4 color;
 uniform float anti_aliasing;
 out lowp vec4 fragColor;
@@ -56,7 +57,7 @@ void main() {
     // stay hard because the caps cover them. Without anti-aliasing the
     // tests are the original hard ones.
     bool antiAliased = anti_aliasing > 0.5;
-    float radialEdge = max(fwidth(dist), 0.000001);
+    float radialEdge = vWorldPerPixel;
     float radialAlpha = antiAliased
         ? clamp((dist - innerRadius) / radialEdge + 0.5, 0.0, 1.0)
             * clamp((outerRadius - dist) / radialEdge + 0.5, 0.0, 1.0)
@@ -73,8 +74,8 @@ void main() {
         float endDistance = length(vPosition - endPoint);
         capAlpha = antiAliased
             ? max(
-                clamp((halfThickness - startDistance) / max(fwidth(startDistance), 0.000001) + 0.5, 0.0, 1.0),
-                clamp((halfThickness - endDistance) / max(fwidth(endDistance), 0.000001) + 0.5, 0.0, 1.0))
+                clamp((halfThickness - startDistance) / vWorldPerPixel + 0.5, 0.0, 1.0),
+                clamp((halfThickness - endDistance) / vWorldPerPixel + 0.5, 0.0, 1.0))
             : (startDistance <= halfThickness || endDistance <= halfThickness ? 1.0 : 0.0);
         if (vOutlineThickness > 0.0) {
             float innerCapRadius = max(halfThickness - vOutlineThickness, 0.0);

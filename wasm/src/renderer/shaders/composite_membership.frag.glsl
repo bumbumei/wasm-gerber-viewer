@@ -15,8 +15,12 @@ uniform int u_base_slot;
 
 out highp vec4 fragColor;
 
+// Source masks keep the geometry's own edge coverage in red and the
+// displayed coverage (after the minimum-feature-width compensation) in
+// alpha. Membership is a geometric question, so it reads red: a pad held at
+// the minimum width belongs to the composite even though it is drawn dim.
 bool covered(sampler2D source_texture, ivec2 pixel) {
-    return texelFetch(source_texture, pixel, 0).a >= 0.5;
+    return texelFetch(source_texture, pixel, 0).r >= 0.5;
 }
 
 void addMembership(inout uvec3 membership, int local_slot, bool is_covered) {

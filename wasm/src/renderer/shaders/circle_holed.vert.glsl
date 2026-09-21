@@ -15,6 +15,7 @@ out highp vec2 vPosition;
 out highp vec2 vHoleCenter;
 out highp float vHoleRadius;
 out highp float vCoverage;
+out highp float vEdgeWidth;
 
 // The smallest on-screen scale of the current transform, in pixels per world
 // unit (the shorter axis when the view is anisotropic).
@@ -53,6 +54,7 @@ void main() {
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
     vPosition = position * (drawnRadius / safeRadius);
+    vEdgeWidth = 1.0 / max(effectiveRadius * pixelsPerWorld, 0.000001);
     vHoleCenter = (vec2(hole_x_instance, hole_y_instance) - center) / safeRadius;
     vHoleRadius = hole_radius_instance / safeRadius;
 }

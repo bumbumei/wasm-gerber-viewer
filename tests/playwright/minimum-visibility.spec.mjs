@@ -213,3 +213,54 @@ test("anti-aliasing is off by default and adds edge coverage when enabled", asyn
   await page.waitForTimeout(400);
   expect((await ink(page)).count).toBe(inkOff.count);
 });
+
+test("pads held at the minimum width stay members of a composite", async ({ page }) => {
+  // A composite is filled where its source mask says the geometry is
+  // present. The minimum width dims an enlarged pad's displayed coverage;
+  // that must not drop it out of the composite.
+  await page.goto("/");
+  await page.locator("#file-input").setInputFiles([
+    { name: "pads.gtl", mimeType: "text/plain", buffer: Buffer.from(denseBgaGerber("round flashes")) },
+    { name: "squares.gtl", mimeType: "text/plain", buffer: Buffer.from(denseBgaGerber("square regions")) },
+  ]);
+  await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+  await expect(page.locator(".gerber-layer-item")).toHaveCount(2);
+
+  // Zoom out until the 0.25 mm pads are held at the minimum width and drawn
+  // well below half coverage, and measure the source layers themselves.
+  const canvas = page.locator("#gerber-canvas");
+  const box = await canvas.boundingBox();
+  for (let tick = 0; tick < 16; tick++) {
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.wheel(0, 120);
+    await page.waitForTimeout(60);
+  }
+  await page.waitForTimeout(500);
+  await setMinimumVisibility(page, 2);
+  const sourceInk = await ink(page);
+
+  await page.locator("[data-panel-tab='layers']").click();
+  await page.locator(".layer-create-composite button").click();
+  const dialog = page.locator(".composite-layer-dialog");
+  await dialog.locator("[data-composite-name]").fill("Pads union");
+  for (const name of ["pads.gtl", "squares.gtl"]) {
+    await dialog.locator(".composite-source-choice", { hasText: name }).locator("input").check();
+  }
+  await dialog.locator('[data-composite-preset="union"]').click();
+  await dialog.locator("[data-composite-submit]").click();
+  await expect(page.locator(".composite-layer-item")).toHaveCount(1);
+
+  // Hide both Gerber sources so only the composite paints the canvas (the
+  // composite row carries the gerber-layer-item class too).
+  for (const row of await page.locator(".gerber-layer-item:not(.composite-layer-item)").all()) {
+    await row.locator(".layer-checkbox").uncheck();
+  }
+  await expect(page.locator("#visible-layer-count")).toHaveText("1 / 3");
+  await page.waitForTimeout(400);
+  const compositeInk = await ink(page);
+
+  // The composite (union of both arrays) must show them as densely as the
+  // source layers themselves do.
+  expect(sourceInk.count).toBeGreaterThan(1000);
+  expect(compositeInk.count).toBeGreaterThan(sourceInk.count * 0.8);
+});

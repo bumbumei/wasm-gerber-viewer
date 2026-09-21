@@ -7678,15 +7678,22 @@ impl Renderer {
                 self.gl.blend_func(ONE, ONE);
                 self.gl.blend_equation(WebGl2RenderingContext::MAX);
             } else if is_negative {
-                // Negative polarity: erase alpha
-                self.gl
-                    .blend_func_separate(ZERO, ONE, ZERO, ONE_MINUS_SRC_ALPHA);
+                // Negative polarity: erase the presence (red) by the shape's
+                // edge coverage and the displayed coverage (alpha) by the
+                // compensated coverage.
+                self.gl.blend_func_separate(
+                    ZERO,
+                    WebGl2RenderingContext::ONE_MINUS_SRC_COLOR,
+                    ZERO,
+                    ONE_MINUS_SRC_ALPHA,
+                );
                 self.gl.blend_equation(FUNC_ADD);
             } else {
-                // Positive polarity: colour untouched, alpha is the coverage
-                self.gl.blend_func_separate(ZERO, ONE, ONE, ONE);
-                self.gl
-                    .blend_equation_separate(FUNC_ADD, WebGl2RenderingContext::MAX);
+                // Positive polarity: red is the union of the shapes' own edge
+                // coverage (composite membership), alpha the union of the
+                // displayed coverage.
+                self.gl.blend_func_separate(ONE, ONE, ONE, ONE);
+                self.gl.blend_equation(WebGl2RenderingContext::MAX);
             }
 
             // Render all shapes (empty checks done inside draw methods)

@@ -18,6 +18,8 @@ out highp vec2 vPosition;
 out highp vec2 vHoleCenter;
 out highp float vHoleRadius;
 out highp float vCoverage;
+// World units per pixel for the hole edge ramp (see circle.vert.glsl).
+out highp float vWorldPerPixel;
 
 // The smallest on-screen scale of the current transform, in pixels per world
 // unit (the shorter axis when the view is anisotropic).
@@ -49,6 +51,7 @@ vec2 minimumScale(vec2 halfSize, float pixelsPerWorld) {
 
 void main() {
     float pixelsPerWorld = max(weakestPixelsPerWorld(), 0.000001);
+    vWorldPerPixel = 1.0 / pixelsPerWorld;
     vec2 scale = minimumScale(vec2(region_half_width, region_half_height), pixelsPerWorld);
     vec2 center = vec2(region_center_x, region_center_y);
     vec2 scaledPosition = center + (position - center) * scale;
