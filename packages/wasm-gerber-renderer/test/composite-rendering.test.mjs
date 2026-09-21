@@ -6027,7 +6027,10 @@ async function withCompositeProcessor(
                 forcedGetError = 0x0505;
                 return result;
               }
-              if (forceNextR8 && args[2] === target.R8) {
+              // Gerber layer masks are RG8 (display + presence); internal outline
+              // masks and composite outputs stay R8. Both are the single-/two-
+              // channel family whose allocation this harness makes fail.
+              if (forceNextR8 && (args[2] === target.R8 || args[2] === target.RG8)) {
                 forceNextR8 = false;
                 forcedR8 = true;
                 const result = value.apply(target, args);
