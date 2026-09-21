@@ -10,6 +10,7 @@ in float thickness_instance;
 uniform mat3 transform;
 uniform vec2 viewport_size;
 uniform float minimum_feature_pixels;
+uniform float anti_aliasing;
 uniform float inner_outline_pixels;
 uniform float inner_outline_world;
 out highp vec2 vPosition;
@@ -43,7 +44,8 @@ void main() {
     // Anti-aliasing fringe: the quad grows by half a pixel so the soft edge
     // has room; vPosition stays in world units so the fragment tests are
     // unchanged.
-    float drawnRadius = maxRadius + 0.5 / max(pixelsPerWorld, 0.000001);
+    float fringe = anti_aliasing > 0.5 ? 0.5 / max(pixelsPerWorld, 0.000001) : 0.0;
+    float drawnRadius = maxRadius + fringe;
     vec2 scaledPos = position * drawnRadius + vec2(center_x_instance, center_y_instance);
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);

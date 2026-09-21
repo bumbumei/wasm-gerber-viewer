@@ -587,17 +587,31 @@ fn path_region_bounds_come_from_the_cover_quads() {
 }
 
 #[test]
+fn template_bounds_center_is_the_bounding_box_centre() {
+    // A macro whose shape sits away from the flash origin, as an offset
+    // primitive 4 outline does.
+    let offset_square = [1.0, 0.0, 3.0, 0.0, 3.0, 0.5, 1.0, 0.0, 3.0, 0.5, 1.0, 0.5];
+    let (center, half_size) = triangle_bounds_center_and_half_size(&offset_square);
+    assert_eq!(center, [2.0, 0.25]);
+    assert_eq!(half_size, [1.0, 0.25]);
+    assert_eq!(
+        triangle_bounds_center_and_half_size(&[]),
+        ([0.0, 0.0], [0.0, 0.0])
+    );
+}
+
+#[test]
 fn triangle_bounds_half_size_follows_the_bounding_box() {
     // A 2 x 0.4 rectangle as two triangles.
     let thin = [
         -1.0, -0.2, 1.0, -0.2, 1.0, 0.2, //
         -1.0, -0.2, 1.0, 0.2, -1.0, 0.2,
     ];
-    let [hw, hh] = triangle_bounds_half_size(&thin);
+    let [hw, hh] = triangle_bounds_center_and_half_size(&thin).1;
     assert!((hw - 1.0).abs() < 1e-6 && (hh - 0.2).abs() < 1e-6);
-    assert_eq!(triangle_bounds_half_size(&[]), [0.0, 0.0]);
+    assert_eq!(triangle_bounds_center_and_half_size(&[]).1, [0.0, 0.0]);
     assert_eq!(
-        triangle_bounds_half_size(&[0.0, f32::NAN, 1.0, 1.0]),
+        triangle_bounds_center_and_half_size(&[0.0, f32::NAN, 1.0, 1.0]).1,
         [0.0, 0.0]
     );
 }

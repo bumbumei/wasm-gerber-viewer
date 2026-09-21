@@ -179,6 +179,7 @@ impl ShaderPrograms {
                 "color",
                 "viewport_size",
                 "minimum_feature_pixels",
+                "anti_aliasing",
             ],
         )?;
         pending.track(&triangle);
@@ -193,6 +194,7 @@ impl ShaderPrograms {
                 "color",
                 "viewport_size",
                 "minimum_feature_pixels",
+                "template_center",
                 "template_half_size",
             ],
         )?;
@@ -215,6 +217,7 @@ impl ShaderPrograms {
                 "color",
                 "viewport_size",
                 "minimum_feature_pixels",
+                "anti_aliasing",
                 "inner_outline_pixels",
                 "inner_outline_world",
             ],
@@ -236,6 +239,7 @@ impl ShaderPrograms {
                 "color",
                 "viewport_size",
                 "minimum_feature_pixels",
+                "anti_aliasing",
                 "inner_outline_pixels",
                 "inner_outline_world",
             ],
@@ -260,6 +264,7 @@ impl ShaderPrograms {
                 "color",
                 "viewport_size",
                 "minimum_feature_pixels",
+                "anti_aliasing",
             ],
         )?;
         pending.track(&circle_holed);
@@ -282,6 +287,7 @@ impl ShaderPrograms {
                 "color",
                 "viewport_size",
                 "minimum_feature_pixels",
+                "anti_aliasing",
                 "inner_outline_pixels",
                 "inner_outline_world",
             ],

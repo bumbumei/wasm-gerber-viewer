@@ -10,6 +10,7 @@ in float hole_radius_instance;
 uniform mat3 transform;
 uniform vec2 viewport_size;
 uniform float minimum_feature_pixels;
+uniform float anti_aliasing;
 out highp vec2 vPosition;
 out highp vec2 vHoleCenter;
 out highp float vHoleRadius;
@@ -46,7 +47,8 @@ void main() {
     // Anti-aliasing fringe (see circle.vert.glsl): the quad grows by half a
     // pixel while vPosition keeps the true radius at 1.0.
     float safeRadius = max(effectiveRadius, 0.000000001);
-    float drawnRadius = effectiveRadius + 0.5 / pixelsPerWorld;
+    float fringe = anti_aliasing > 0.5 ? 0.5 / pixelsPerWorld : 0.0;
+    float drawnRadius = effectiveRadius + fringe;
     vec2 scaledPos = position * drawnRadius + center;
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);

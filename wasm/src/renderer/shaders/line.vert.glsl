@@ -9,6 +9,7 @@ in float width_instance;
 uniform mat3 transform;
 uniform vec2 viewport_size;
 uniform float minimum_feature_pixels;
+uniform float anti_aliasing;
 uniform float inner_outline_pixels;
 uniform float inner_outline_world;
 out highp float vSide;
@@ -51,7 +52,7 @@ void main() {
     // Anti-aliasing: the body grows by half a pixel on each side so the
     // fragment shader's soft edge has room; abs(vSide) == 1.0 stays the true
     // edge. Round caps are drawn separately as circles.
-    float drawnHalfWidthPixels = expandedHalfWidthPixels + 0.5;
+    float drawnHalfWidthPixels = expandedHalfWidthPixels + (anti_aliasing > 0.5 ? 0.5 : 0.0);
     vSide = position.y * (drawnHalfWidthPixels / max(expandedHalfWidthPixels, 0.000001));
     vInnerSide = outlinePixels > 0.0 && expandedHalfWidthPixels > 0.000001
         ? halfWidthPixels / expandedHalfWidthPixels

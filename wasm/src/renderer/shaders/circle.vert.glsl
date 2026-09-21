@@ -7,6 +7,7 @@ in float radius_instance;
 uniform mat3 transform;
 uniform vec2 viewport_size;
 uniform float minimum_feature_pixels;
+uniform float anti_aliasing;
 uniform float inner_outline_pixels;
 uniform float inner_outline_world;
 out highp vec2 vPosition;
@@ -53,7 +54,8 @@ void main() {
     // Anti-aliasing: the quad grows by half a pixel so the fragment shader's
     // soft edge has room outside the true radius, which stays at
     // length(vPosition) == 1.0.
-    float drawnRadius = effectiveRadius + 0.5 / pixelsPerWorld;
+    float fringe = anti_aliasing > 0.5 ? 0.5 / pixelsPerWorld : 0.0;
+    float drawnRadius = effectiveRadius + fringe;
     vec2 scaledPos = position * drawnRadius + center;
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);

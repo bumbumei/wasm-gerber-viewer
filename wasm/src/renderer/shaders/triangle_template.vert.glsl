@@ -6,7 +6,10 @@ in float instance_y;
 uniform mat3 transform;
 uniform vec2 viewport_size;
 uniform float minimum_feature_pixels;
-// Half size of the template's bounding box, in world units.
+// Centre and half size of the template's bounding box, in template-local
+// world units. A macro whose shape sits away from the flash origin must be
+// scaled about its own centre, not about the flash point, or the pad moves.
+uniform vec2 template_center;
 uniform vec2 template_half_size;
 out highp float vCoverage;
 
@@ -44,7 +47,8 @@ void main() {
     // stays visible without a thin shape growing along its length.
     float pixelsPerWorld = max(weakestPixelsPerWorld(), 0.000001);
     vec2 scale = minimumScale(template_half_size, pixelsPerWorld);
-    vec2 worldPosition = position * scale + vec2(instance_x, instance_y);
+    vec2 worldPosition = template_center + (position - template_center) * scale
+        + vec2(instance_x, instance_y);
     vec3 transformed = transform * vec3(worldPosition, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
     vCoverage = 1.0 / sqrt(scale.x * scale.y);

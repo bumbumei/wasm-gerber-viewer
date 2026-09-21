@@ -109,6 +109,16 @@ struct MsaaTarget {
     internal_format: u32,
 }
 
+/// Why a multisample target could not be created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MsaaFailure {
+    /// Too few samples, an incomplete framebuffer or a GL error other than
+    /// memory: this context will not multisample the mask formats.
+    Unsupported,
+    /// `OUT_OF_MEMORY` at this size; a smaller canvas may still work.
+    OutOfMemory,
+}
+
 /// Samples per pixel for the layer masks. Triangle edges (regions, macro
 /// flashes, path regions) are anti-aliased by the multisampling; discs and
 /// line bodies compute their edge coverage analytically in the fragment
@@ -119,9 +129,13 @@ pub struct Renderer {
     gl: WebGl2RenderingContext,
     explicit_size: Option<(u32, u32)>,
     msaa_target: Option<MsaaTarget>,
-    /// Set once multisampled renderbuffers turn out to be unavailable, so the
-    /// masks are rendered directly from then on.
-    msaa_unavailable: bool,
+    /// Set once the context proves unable to multisample or resolve the mask
+    /// formats (too few samples, incomplete framebuffer, failed blit), so the
+    /// masks are rendered directly from then on. Cleared on context restore.
+    msaa_unsupported: bool,
+    /// Canvas size at which the last allocation failed for lack of memory.
+    /// The same size is not retried every frame; a different size is.
+    msaa_failed_size: Option<(u32, u32)>,
     layers: Vec<Option<LayerMetadata>>, // Sparse vec (None = deallocated slot)
     composites: Vec<Option<CompositeLayerMetadata>>,
     internal_layer_ids: HashSet<usize>,
@@ -133,6 +147,10 @@ pub struct Renderer {
     quad_buffer: WebGlBuffer, // Shared quad buffer for all layers
     fullscreen_vertex_array: WebGlVertexArrayObject,
     minimum_feature_pixels: f32,
+    /// Anti-aliased layer masks: multisampled render target plus analytic
+    /// edge coverage in the disc, line, arc and hole shaders. Off by default;
+    /// costs one canvas-sized multisample target and a resolve per layer.
+    anti_aliasing: bool,
     highlight_program: Option<ShaderProgram>,
     highlight_stencil_program: Option<ShaderProgram>,
     highlight_buffer: Option<WebGlBuffer>,
@@ -1095,7 +1113,8 @@ impl Renderer {
             gl,
             explicit_size,
             msaa_target: None,
-            msaa_unavailable: false,
+            msaa_unsupported: false,
+            msaa_failed_size: None,
             layers: Vec::new(),
             composites: Vec::new(),
             internal_layer_ids: HashSet::new(),
@@ -1107,6 +1126,7 @@ impl Renderer {
             quad_buffer,
             fullscreen_vertex_array,
             minimum_feature_pixels: 0.0,
+            anti_aliasing: false,
             highlight_program: None,
             highlight_stencil_program: None,
             highlight_buffer: None,
@@ -1136,6 +1156,20 @@ impl Renderer {
         }
 
         self.minimum_feature_pixels = next_pixels;
+        self.mark_all_layers_dirty();
+    }
+
+    /// Turn anti-aliased layer masks on or off. Off renders the masks
+    /// point-sampled as before; on adds the multisample target and analytic
+    /// edge coverage.
+    pub fn set_anti_aliasing(&mut self, enabled: bool) {
+        if self.anti_aliasing == enabled {
+            return;
+        }
+        self.anti_aliasing = enabled;
+        if !enabled {
+            self.release_msaa_target();
+        }
         self.mark_all_layers_dirty();
     }
 
@@ -3209,7 +3243,9 @@ impl Renderer {
             template_cache.vao = Some(vao);
             template_cache.vertex_count = vertex_count;
             template_cache.instance_count = instance_count;
-            template_cache.half_size = triangle_bounds_half_size(&vertices.to_vec());
+            let (center, half_size) = triangle_bounds_center_and_half_size(&vertices.to_vec());
+            template_cache.center = center;
+            template_cache.half_size = half_size;
             let vertex_buffer = Self::create_attrib_buffer_from_js_array(
                 &self.gl,
                 &vertices,
@@ -3966,6 +4002,10 @@ impl Renderer {
         if let Some(loc) = program.uniforms.get("minimum_feature_pixels") {
             self.gl.uniform1f(Some(loc), self.minimum_feature_pixels);
         }
+        if let Some(loc) = program.uniforms.get("anti_aliasing") {
+            self.gl
+                .uniform1f(Some(loc), if self.anti_aliasing { 1.0 } else { 0.0 });
+        }
         if let Some(loc) = program.uniforms.get("inner_outline_pixels") {
             self.gl.uniform1f(Some(loc), inner_outline_pixels);
         }
@@ -4665,6 +4705,8 @@ impl Renderer {
         if let Some(scratch) = self.membership_scratch.take() {
             Self::delete_fbo(&self.gl, scratch);
         }
+        self.release_msaa_target();
+        self.msaa_failed_size = None;
         self.membership_scratch_owner = None;
         self.active_composite_scratch = HashSet::new();
         self.render_scratch_growth_count = 0;
@@ -6514,7 +6556,8 @@ impl Renderer {
                         "triangle template instance count",
                         template.instance_x.len(),
                     )?;
-                    let half_size = triangle_bounds_half_size(&template.vertices);
+                    let (center, half_size) =
+                        triangle_bounds_center_and_half_size(&template.vertices);
                     let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
                     pending_cache
                         .cache
@@ -6570,6 +6613,7 @@ impl Renderer {
                     template_cache.vao = built_template_cache.vao.take();
                     template_cache.vertex_count = vertex_count;
                     template_cache.instance_count = instance_count;
+                    template_cache.center = center;
                     template_cache.half_size = half_size;
                     template_cache.vertex_buffer = built_template_cache.vertex_buffer.take();
                     template_cache.instance_x_buffer =
@@ -6602,6 +6646,13 @@ impl Renderer {
             }
             if let Some(loc) = program.uniforms.get("color") {
                 self.gl.uniform4fv_with_f32_array(Some(loc), color);
+            }
+            if let Some(loc) = program.uniforms.get("template_center") {
+                self.gl.uniform2f(
+                    Some(loc),
+                    template_cache.center[0],
+                    template_cache.center[1],
+                );
             }
             if let Some(loc) = program.uniforms.get("template_half_size") {
                 self.gl.uniform2f(
@@ -9037,6 +9088,9 @@ impl Renderer {
             .map(|target| target.framebuffer.clone());
         if let Some(msaa_framebuffer) = &msaa_framebuffer {
             self.render_layer_mask_into(layer_idx, msaa_framebuffer, &transform, width, height)?;
+            // A geometry draw error is a rendering error like before, not a
+            // reason to give up multisampling.
+            Self::check_gl_stage(&self.gl, "Gerber mask rendering")?;
             // Resolve the multisampled mask into the layer texture.
             Self::bind_read_target(&self.gl, msaa_framebuffer);
             Self::bind_draw_target(&self.gl, Some(&framebuffer));
@@ -9107,7 +9161,10 @@ impl Renderer {
         height: u32,
         internal_format: u32,
     ) -> Option<&MsaaTarget> {
-        if self.msaa_unavailable {
+        if !self.anti_aliasing
+            || self.msaa_unsupported
+            || self.msaa_failed_size == Some((width, height))
+        {
             return None;
         }
         let matches = self.msaa_target.as_ref().is_some_and(|target| {
@@ -9120,10 +9177,18 @@ impl Renderer {
                 Self::delete_msaa_target(&self.gl, old);
             }
             match Self::create_msaa_target(&self.gl, width, height, internal_format) {
-                Some(target) => self.msaa_target = Some(target),
-                None => {
+                Ok(target) => {
+                    self.msaa_failed_size = None;
+                    self.msaa_target = Some(target);
+                }
+                Err(MsaaFailure::Unsupported) => {
                     Self::drain_gl_errors(&self.gl);
-                    self.msaa_unavailable = true;
+                    self.msaa_unsupported = true;
+                    return None;
+                }
+                Err(MsaaFailure::OutOfMemory) => {
+                    Self::drain_gl_errors(&self.gl);
+                    self.msaa_failed_size = Some((width, height));
                     return None;
                 }
             }
@@ -9131,11 +9196,18 @@ impl Renderer {
         self.msaa_target.as_ref()
     }
 
+    /// Give up multisampling on this context after a resolve failure.
     fn disable_msaa(&mut self) {
         if let Some(target) = self.msaa_target.take() {
             Self::delete_msaa_target(&self.gl, target);
         }
-        self.msaa_unavailable = true;
+        self.msaa_unsupported = true;
+    }
+
+    fn release_msaa_target(&mut self) {
+        if let Some(target) = self.msaa_target.take() {
+            Self::delete_msaa_target(&self.gl, target);
+        }
     }
 
     fn create_msaa_target(
@@ -9143,7 +9215,7 @@ impl Renderer {
         width: u32,
         height: u32,
         internal_format: u32,
-    ) -> Option<MsaaTarget> {
+    ) -> Result<MsaaTarget, MsaaFailure> {
         let max_samples = gl
             .get_parameter(WebGl2RenderingContext::MAX_SAMPLES)
             .ok()
@@ -9151,10 +9223,12 @@ impl Renderer {
             .unwrap_or(0.0) as i32;
         let samples = MSAA_SAMPLES.min(max_samples);
         if samples < 2 {
-            return None;
+            return Err(MsaaFailure::Unsupported);
         }
-        let width_i32 = Self::checked_u32_to_i32("MSAA width", width).ok()?;
-        let height_i32 = Self::checked_u32_to_i32("MSAA height", height).ok()?;
+        let width_i32 =
+            Self::checked_u32_to_i32("MSAA width", width).map_err(|_| MsaaFailure::Unsupported)?;
+        let height_i32 = Self::checked_u32_to_i32("MSAA height", height)
+            .map_err(|_| MsaaFailure::Unsupported)?;
         Self::drain_gl_errors(gl);
 
         // A stencil-only buffer costs one byte per sample; fall back to the
@@ -9170,12 +9244,12 @@ impl Renderer {
                 WebGl2RenderingContext::DEPTH_STENCIL_ATTACHMENT,
             ),
         ] {
-            let framebuffer = gl.create_framebuffer()?;
+            let framebuffer = gl.create_framebuffer().ok_or(MsaaFailure::OutOfMemory)?;
             let color = match gl.create_renderbuffer() {
                 Some(color) => color,
                 None => {
                     gl.delete_framebuffer(Some(&framebuffer));
-                    return None;
+                    return Err(MsaaFailure::OutOfMemory);
                 }
             };
             let stencil = match gl.create_renderbuffer() {
@@ -9183,7 +9257,7 @@ impl Renderer {
                 None => {
                     gl.delete_framebuffer(Some(&framebuffer));
                     gl.delete_renderbuffer(Some(&color));
-                    return None;
+                    return Err(MsaaFailure::OutOfMemory);
                 }
             };
             let target = MsaaTarget {
@@ -9230,15 +9304,21 @@ impl Renderer {
             );
             let status = gl.check_framebuffer_status(WebGl2RenderingContext::FRAMEBUFFER);
             gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+            let error = gl.get_error();
             if status == WebGl2RenderingContext::FRAMEBUFFER_COMPLETE
-                && gl.get_error() == WebGl2RenderingContext::NO_ERROR
+                && error == WebGl2RenderingContext::NO_ERROR
             {
-                return Some(target);
+                return Ok(target);
             }
             Self::drain_gl_errors(gl);
             Self::delete_msaa_target(gl, target);
+            if error == WebGl2RenderingContext::OUT_OF_MEMORY {
+                // The size, not the format, is the problem: worth retrying at
+                // another size, pointless with another stencil format.
+                return Err(MsaaFailure::OutOfMemory);
+            }
         }
-        None
+        Err(MsaaFailure::Unsupported)
     }
 
     fn delete_msaa_target(gl: &WebGl2RenderingContext, target: MsaaTarget) {
@@ -9841,9 +9921,8 @@ impl Renderer {
         }
 
         let replacements = pending_fbos.commit();
-        if let Some(target) = self.msaa_target.take() {
-            Self::delete_msaa_target(&self.gl, target);
-        }
+        self.release_msaa_target();
+        self.msaa_failed_size = None;
         if self.explicit_size.is_some() {
             self.explicit_size = Some((width, height));
         }
@@ -9946,10 +10025,14 @@ impl Renderer {
         let (programs, quad_buffer, fullscreen_vertex_array, new_fbos) = pending.commit();
 
         let old_gl = self.gl.clone();
-        // The multisample target belonged to the lost context; try again on
-        // the new one.
-        self.msaa_target = None;
-        self.msaa_unavailable = false;
+        // Release the multisample target on the context that owns it (a
+        // no-op if that context is already lost) and start over on the new
+        // one.
+        if let Some(target) = self.msaa_target.take() {
+            Self::delete_msaa_target(&old_gl, target);
+        }
+        self.msaa_unsupported = false;
+        self.msaa_failed_size = None;
         let old_programs = std::mem::replace(&mut self.programs, programs);
         let old_quad_buffer = std::mem::replace(&mut self.quad_buffer, quad_buffer);
         let old_fullscreen_vertex_array =
@@ -10010,9 +10093,7 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
-        if let Some(target) = self.msaa_target.take() {
-            Self::delete_msaa_target(&self.gl, target);
-        }
+        self.release_msaa_target();
         self.clear_all();
         self.delete_highlight_resources();
         self.gl
@@ -10051,10 +10132,15 @@ fn vertex_bounds(vertices: &[f32]) -> Option<[f32; 4]> {
 /// Half size of the bounding box of a triangle template (world units), which
 /// the minimum-visibility clamp compares with the pixel minimum per axis.
 /// Zero for empty or non-finite input.
-fn triangle_bounds_half_size(vertices: &[f32]) -> [f32; 2] {
+/// `(centre, half size)` of the bounding box of interleaved x/y vertices;
+/// zeros when empty or not finite.
+fn triangle_bounds_center_and_half_size(vertices: &[f32]) -> ([f32; 2], [f32; 2]) {
     match vertex_bounds(vertices) {
-        Some([min_x, min_y, max_x, max_y]) => [(max_x - min_x) * 0.5, (max_y - min_y) * 0.5],
-        None => [0.0, 0.0],
+        Some([min_x, min_y, max_x, max_y]) => (
+            [(min_x + max_x) * 0.5, (min_y + max_y) * 0.5],
+            [(max_x - min_x) * 0.5, (max_y - min_y) * 0.5],
+        ),
+        None => ([0.0, 0.0], [0.0, 0.0]),
     }
 }
 
