@@ -11,17 +11,25 @@ pub struct Fbo {
     pub color_format: &'static str,
 }
 
+/// Oriented frame of a filled shape for the minimum feature width: its
+/// centre, the angle of its principal axis and the half extents along that
+/// axis and its normal. Zero extents leave the shape unscaled.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ShapeFrame {
+    pub center: [f32; 2],
+    pub angle: f32,
+    pub half_size: [f32; 2],
+}
+
 /// Buffer cache for one repeated triangle mesh template.
 #[derive(Default)]
 pub struct TriangleTemplateBufferCache {
     pub vao: Option<WebGlVertexArrayObject>,
     pub vertex_count: i32,
     pub instance_count: i32,
-    /// Centre and half size of the template's bounding box (template-local
-    /// world units), used by the minimum-visibility clamp once the CPU
-    /// geometry is released.
-    pub center: [f32; 2],
-    pub half_size: [f32; 2],
+    /// Oriented frame of the template (template-local world units), used by
+    /// the minimum-visibility clamp once the CPU geometry is released.
+    pub frame: ShapeFrame,
     pub vertex_buffer: Option<WebGlBuffer>,
     pub instance_x_buffer: Option<WebGlBuffer>,
     pub instance_y_buffer: Option<WebGlBuffer>,
@@ -40,6 +48,7 @@ pub struct BufferCache {
     // Per-vertex bounding box of each triangle (minimum-visibility clamp)
     pub triangle_region_center_x_buffer: Option<WebGlBuffer>,
     pub triangle_region_center_y_buffer: Option<WebGlBuffer>,
+    pub triangle_region_angle_buffer: Option<WebGlBuffer>,
     pub triangle_region_half_width_buffer: Option<WebGlBuffer>,
     pub triangle_region_half_height_buffer: Option<WebGlBuffer>,
     pub triangle_template_caches: Vec<TriangleTemplateBufferCache>,
@@ -96,8 +105,8 @@ pub struct BufferCache {
     pub path_clear_vao: Option<WebGlVertexArrayObject>,
     pub path_clear_vertex_count: i32,
     pub path_clear_vertex_buffer: Option<WebGlBuffer>,
-    /// `[min_x, min_y, max_x, max_y]` per path region, kept after the CPU
-    /// geometry is released so the minimum feature width can scale each
-    /// region about its own centre.
-    pub path_region_bounds: Vec<[f32; 4]>,
+    /// Oriented frame per path region, kept after the CPU geometry is
+    /// released so the minimum feature width can scale each region about its
+    /// own centre along its own axes.
+    pub path_region_frames: Vec<ShapeFrame>,
 }

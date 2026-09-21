@@ -4,7 +4,7 @@ mod composite;
 mod shader;
 
 // Internal use only
-use buffer::{BufferCache, Fbo, TriangleTemplateBufferCache};
+use buffer::{BufferCache, Fbo, ShapeFrame, TriangleTemplateBufferCache};
 use camera::Camera;
 use composite::{
     get_bit as composite_get_bit, normalize_fallback_bounds, preset_bitset,
@@ -3183,6 +3183,13 @@ impl Renderer {
             "region_center_y",
             0,
         )?);
+        buffer_cache.triangle_region_angle_buffer = Some(Self::create_instance_buffer(
+            &self.gl,
+            &region.angle,
+            &self.programs.triangle,
+            "region_angle",
+            0,
+        )?);
         buffer_cache.triangle_region_half_width_buffer = Some(Self::create_instance_buffer(
             &self.gl,
             &region.half_width,
@@ -3243,9 +3250,7 @@ impl Renderer {
             template_cache.vao = Some(vao);
             template_cache.vertex_count = vertex_count;
             template_cache.instance_count = instance_count;
-            let (center, half_size) = triangle_bounds_center_and_half_size(&vertices.to_vec());
-            template_cache.center = center;
-            template_cache.half_size = half_size;
+            template_cache.frame = oriented_frame_of_vertices(&vertices.to_vec());
             let vertex_buffer = Self::create_attrib_buffer_from_js_array(
                 &self.gl,
                 &vertices,
@@ -3802,8 +3807,11 @@ impl Renderer {
                 ));
             }
             Self::validate_js_finite_array("path region cover vertices", &cover_vertices)?;
-            buffer_cache.path_region_bounds =
-                path_region_bounds_from_cover_quads(&cover_vertices.to_vec());
+            buffer_cache.path_region_frames = path_region_frames(
+                &wedge_vertices.to_vec(),
+                &Self::js_u32_array(&path_regions, "wedgeVertexOffsets")?.to_vec(),
+                &cover_vertices.to_vec(),
+            );
             let vao = self
                 .gl
                 .create_vertex_array()
@@ -4824,6 +4832,7 @@ impl Renderer {
         for buf in [
             cache.triangle_region_center_x_buffer,
             cache.triangle_region_center_y_buffer,
+            cache.triangle_region_angle_buffer,
             cache.triangle_region_half_width_buffer,
             cache.triangle_region_half_height_buffer,
         ]
@@ -4987,7 +4996,7 @@ impl Renderer {
         cache.path_sector_vertex_count = 0;
         cache.path_cover_vertex_count = 0;
         cache.path_clear_vertex_count = 0;
-        cache.path_region_bounds = Vec::new();
+        cache.path_region_frames = Vec::new();
     }
 
     fn path_region_cache_complete(cache: &BufferCache, path_regions: &PathRegions) -> bool {
@@ -5009,7 +5018,7 @@ impl Renderer {
 
         cache.path_cover_vao.is_some()
             && cache.path_clear_vao.is_some()
-            && cache.path_region_bounds.len() == path_regions.region_count()
+            && cache.path_region_frames.len() == path_regions.region_count()
             && (!needs_wedge_cache || cache.path_wedge_vao.is_some())
             && (!needs_sector_cache || cache.path_sector_vao.is_some())
     }
@@ -5027,7 +5036,7 @@ impl Renderer {
         cache.path_clear_vao = built_cache.path_clear_vao.take();
         cache.path_clear_vertex_count = built_cache.path_clear_vertex_count;
         cache.path_clear_vertex_buffer = built_cache.path_clear_vertex_buffer.take();
-        cache.path_region_bounds = std::mem::take(&mut built_cache.path_region_bounds);
+        cache.path_region_frames = std::mem::take(&mut built_cache.path_region_frames);
     }
 
     fn create_fbo(
@@ -6418,15 +6427,17 @@ impl Renderer {
                 for (data, name, slot) in [
                     (&region.center_x, "region_center_x", 0usize),
                     (&region.center_y, "region_center_y", 1),
-                    (&region.half_width, "region_half_width", 2),
-                    (&region.half_height, "region_half_height", 3),
+                    (&region.angle, "region_angle", 2),
+                    (&region.half_width, "region_half_width", 3),
+                    (&region.half_height, "region_half_height", 4),
                 ] {
                     let buffer = Self::create_instance_buffer(&self.gl, data, program, name, 0)?;
                     let cache = &mut pending_cache.cache;
                     *match slot {
                         0 => &mut cache.triangle_region_center_x_buffer,
                         1 => &mut cache.triangle_region_center_y_buffer,
-                        2 => &mut cache.triangle_region_half_width_buffer,
+                        2 => &mut cache.triangle_region_angle_buffer,
+                        3 => &mut cache.triangle_region_half_width_buffer,
                         _ => &mut cache.triangle_region_half_height_buffer,
                     } = Some(buffer);
                 }
@@ -6448,6 +6459,8 @@ impl Renderer {
                     built_cache.triangle_region_center_x_buffer.take();
                 buffer_cache.triangle_region_center_y_buffer =
                     built_cache.triangle_region_center_y_buffer.take();
+                buffer_cache.triangle_region_angle_buffer =
+                    built_cache.triangle_region_angle_buffer.take();
                 buffer_cache.triangle_region_half_width_buffer =
                     built_cache.triangle_region_half_width_buffer.take();
                 buffer_cache.triangle_region_half_height_buffer =
@@ -6556,8 +6569,7 @@ impl Renderer {
                         "triangle template instance count",
                         template.instance_x.len(),
                     )?;
-                    let (center, half_size) =
-                        triangle_bounds_center_and_half_size(&template.vertices);
+                    let frame = oriented_frame_of_vertices(&template.vertices);
                     let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
                     pending_cache
                         .cache
@@ -6613,8 +6625,7 @@ impl Renderer {
                     template_cache.vao = built_template_cache.vao.take();
                     template_cache.vertex_count = vertex_count;
                     template_cache.instance_count = instance_count;
-                    template_cache.center = center;
-                    template_cache.half_size = half_size;
+                    template_cache.frame = frame;
                     template_cache.vertex_buffer = built_template_cache.vertex_buffer.take();
                     template_cache.instance_x_buffer =
                         built_template_cache.instance_x_buffer.take();
@@ -6650,15 +6661,18 @@ impl Renderer {
             if let Some(loc) = program.uniforms.get("template_center") {
                 self.gl.uniform2f(
                     Some(loc),
-                    template_cache.center[0],
-                    template_cache.center[1],
+                    template_cache.frame.center[0],
+                    template_cache.frame.center[1],
                 );
+            }
+            if let Some(loc) = program.uniforms.get("template_angle") {
+                self.gl.uniform1f(Some(loc), template_cache.frame.angle);
             }
             if let Some(loc) = program.uniforms.get("template_half_size") {
                 self.gl.uniform2f(
                     Some(loc),
-                    template_cache.half_size[0],
-                    template_cache.half_size[1],
+                    template_cache.frame.half_size[0],
+                    template_cache.frame.half_size[1],
                 );
             }
             self.set_view_feature_uniforms(
@@ -7308,8 +7322,8 @@ impl Renderer {
         let layer = self.get_layer(layer_id)?;
         let path_regions = &layer.gerber_data[sublayer_idx].path_regions;
         let buffer_cache = &layer.buffer_caches[sublayer_idx];
-        if buffer_cache.path_region_bounds.len() != region_count {
-            return Err(JsValue::from_str("Path region bounds cache is incomplete"));
+        if buffer_cache.path_region_frames.len() != region_count {
+            return Err(JsValue::from_str("Path region frame cache is incomplete"));
         }
 
         for program in [&self.programs.path_solid, &self.programs.path_sector] {
@@ -7324,7 +7338,7 @@ impl Renderer {
 
         let result = (|| {
             for region_idx in 0..region_count {
-                let region_bounds = Some(&buffer_cache.path_region_bounds[region_idx]);
+                let region_bounds = Some(&buffer_cache.path_region_frames[region_idx]);
                 self.gl.color_mask(false, false, false, false);
                 self.gl.stencil_func(ALWAYS, 0, 0xff);
                 self.gl.stencil_op(KEEP, KEEP, INVERT);
@@ -7445,8 +7459,11 @@ impl Renderer {
             buffer_cache.path_sector_vertex_buffer = Some(buffer);
         }
 
-        buffer_cache.path_region_bounds =
-            path_region_bounds_from_cover_quads(&path_regions.cover_vertices);
+        buffer_cache.path_region_frames = path_region_frames(
+            &path_regions.wedge_vertices,
+            &path_regions.wedge_vertex_offsets,
+            &path_regions.cover_vertices,
+        );
         if !path_regions.cover_vertices.is_empty() {
             buffer_cache.path_cover_vertex_count = Self::checked_usize_to_i32(
                 "path region cover vertex count",
@@ -7567,19 +7584,18 @@ impl Renderer {
     /// Point the path shaders at the region being drawn: its centre and
     /// half size drive the minimum feature width scaling. `None` (used by
     /// the highlight passes) disables the scaling for the draw.
-    fn set_path_region_uniforms(&self, program: &ShaderProgram, region_bounds: Option<&[f32; 4]>) {
-        let (center, half_size) = match region_bounds {
-            Some([min_x, min_y, max_x, max_y]) => (
-                [(min_x + max_x) * 0.5, (min_y + max_y) * 0.5],
-                [(max_x - min_x) * 0.5, (max_y - min_y) * 0.5],
-            ),
-            None => ([0.0, 0.0], [0.0, 0.0]),
-        };
+    fn set_path_region_uniforms(&self, program: &ShaderProgram, frame: Option<&ShapeFrame>) {
+        let frame = frame.copied().unwrap_or_default();
         if let Some(loc) = program.uniforms.get("region_center") {
-            self.gl.uniform2f(Some(loc), center[0], center[1]);
+            self.gl
+                .uniform2f(Some(loc), frame.center[0], frame.center[1]);
+        }
+        if let Some(loc) = program.uniforms.get("region_angle") {
+            self.gl.uniform1f(Some(loc), frame.angle);
         }
         if let Some(loc) = program.uniforms.get("region_half_size") {
-            self.gl.uniform2f(Some(loc), half_size[0], half_size[1]);
+            self.gl
+                .uniform2f(Some(loc), frame.half_size[0], frame.half_size[1]);
         }
     }
 
@@ -7590,7 +7606,7 @@ impl Renderer {
         vao: Option<&web_sys::WebGlVertexArrayObject>,
         start: i32,
         count: i32,
-        region_bounds: Option<&[f32; 4]>,
+        region_bounds: Option<&ShapeFrame>,
     ) -> Result<(), JsValue> {
         if count <= 0 {
             return Ok(());
@@ -7619,7 +7635,7 @@ impl Renderer {
         buffer_cache: &BufferCache,
         start: i32,
         count: i32,
-        region_bounds: Option<&[f32; 4]>,
+        region_bounds: Option<&ShapeFrame>,
     ) -> Result<(), JsValue> {
         if count <= 0 {
             return Ok(());
@@ -10110,114 +10126,211 @@ impl Drop for Renderer {
     }
 }
 
-/// One `[min_x, min_y, max_x, max_y]` per path region from its cover quad,
-/// whose six vertices start `min,min / max,min / min,max`.
-fn path_region_bounds_from_cover_quads(cover_vertices: &[f32]) -> Vec<[f32; 4]> {
-    cover_vertices
-        .chunks_exact(12)
-        .map(|quad| [quad[0], quad[1], quad[2], quad[5]])
-        .collect()
-}
-
-/// Bounding box of interleaved x/y vertices: `(min_x, min_y, max_x, max_y)`,
-/// or `None` when empty or any coordinate is not finite.
-fn vertex_bounds(vertices: &[f32]) -> Option<[f32; 4]> {
-    let (mut min_x, mut max_x, mut min_y, mut max_y) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
-    for pair in vertices.chunks_exact(2) {
-        let (x, y) = (pair[0], pair[1]);
-        if !x.is_finite() || !y.is_finite() {
-            return None;
+/// Oriented frame of a point set: the mean is the pivot, the principal axis of
+/// the point covariance gives the angle, and the extents are the projections
+/// onto that axis and its normal. A rotated bar gets its own length and
+/// thickness, not the width and height of an axis-aligned box around it.
+/// Repeated points (fan centres, shared quad corners) count once. Returns the
+/// zero frame when a coordinate is not finite, so the shape stays unscaled.
+fn oriented_frame(points: &[[f32; 2]]) -> ShapeFrame {
+    let mut unique: Vec<[f32; 2]> = Vec::new();
+    let mut seen: HashSet<(u32, u32)> = HashSet::new();
+    for point in points {
+        if !point[0].is_finite() || !point[1].is_finite() {
+            return ShapeFrame::default();
         }
-        min_x = min_x.min(x);
-        max_x = max_x.max(x);
-        min_y = min_y.min(y);
-        max_y = max_y.max(y);
+        if seen.insert((point[0].to_bits(), point[1].to_bits())) {
+            unique.push(*point);
+        }
     }
-    (min_x <= max_x && min_y <= max_y).then_some([min_x, min_y, max_x, max_y])
+    if unique.is_empty() {
+        return ShapeFrame::default();
+    }
+    let count = unique.len() as f64;
+    let (mut mean_x, mut mean_y) = (0.0f64, 0.0f64);
+    for point in &unique {
+        mean_x += point[0] as f64;
+        mean_y += point[1] as f64;
+    }
+    mean_x /= count;
+    mean_y /= count;
+    let (mut cxx, mut cxy, mut cyy) = (0.0f64, 0.0f64, 0.0f64);
+    for point in &unique {
+        let dx = point[0] as f64 - mean_x;
+        let dy = point[1] as f64 - mean_y;
+        cxx += dx * dx;
+        cxy += dx * dy;
+        cyy += dy * dy;
+    }
+    let angle = if cxy.abs() < 1e-18 && (cxx - cyy).abs() < 1e-18 {
+        0.0
+    } else {
+        0.5 * (2.0 * cxy).atan2(cxx - cyy)
+    };
+    let (sin, cos) = angle.sin_cos();
+    let (mut min_u, mut max_u, mut min_v, mut max_v) = (
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for point in &unique {
+        let dx = point[0] as f64 - mean_x;
+        let dy = point[1] as f64 - mean_y;
+        let u = dx * cos + dy * sin;
+        let v = -dx * sin + dy * cos;
+        min_u = min_u.min(u);
+        max_u = max_u.max(u);
+        min_v = min_v.min(v);
+        max_v = max_v.max(v);
+    }
+    let mid_u = (min_u + max_u) * 0.5;
+    let mid_v = (min_v + max_v) * 0.5;
+    ShapeFrame {
+        center: [
+            (mean_x + mid_u * cos - mid_v * sin) as f32,
+            (mean_y + mid_u * sin + mid_v * cos) as f32,
+        ],
+        angle: angle as f32,
+        half_size: [
+            ((max_u - min_u) * 0.5) as f32,
+            ((max_v - min_v) * 0.5) as f32,
+        ],
+    }
 }
 
-/// Half size of the bounding box of a triangle template (world units), which
-/// the minimum-visibility clamp compares with the pixel minimum per axis.
-/// Zero for empty or non-finite input.
-/// `(centre, half size)` of the bounding box of interleaved x/y vertices;
-/// zeros when empty or not finite.
-fn triangle_bounds_center_and_half_size(vertices: &[f32]) -> ([f32; 2], [f32; 2]) {
-    match vertex_bounds(vertices) {
-        Some([min_x, min_y, max_x, max_y]) => (
-            [(min_x + max_x) * 0.5, (min_y + max_y) * 0.5],
-            [(max_x - min_x) * 0.5, (max_y - min_y) * 0.5],
-        ),
-        None => ([0.0, 0.0], [0.0, 0.0]),
-    }
+/// Oriented frame of interleaved x/y vertices.
+fn oriented_frame_of_vertices(vertices: &[f32]) -> ShapeFrame {
+    let points: Vec<[f32; 2]> = vertices.chunks_exact(2).map(|p| [p[0], p[1]]).collect();
+    oriented_frame(&points)
 }
 
-/// Per-vertex bounding-box attributes of the *shape* each triangle belongs to,
-/// for the minimum-visibility clamp of filled regions.
+/// One oriented frame per path region. The wedge triangles of a region are
+/// `(reference, start, end)` fans, so every vertex but the first of each
+/// triangle lies on the contour; regions without wedges (a lone full circle)
+/// fall back to their axis-aligned cover quad.
+fn path_region_frames(
+    wedge_vertices: &[f32],
+    wedge_vertex_offsets: &[u32],
+    cover_vertices: &[f32],
+) -> Vec<ShapeFrame> {
+    let region_count = wedge_vertex_offsets.len().saturating_sub(1);
+    let mut frames = Vec::with_capacity(region_count);
+    for region_idx in 0..region_count {
+        let start = wedge_vertex_offsets[region_idx] as usize;
+        let end = (wedge_vertex_offsets[region_idx + 1] as usize).min(wedge_vertices.len() / 2);
+        let mut points: Vec<[f32; 2]> = Vec::new();
+        let mut vertex = start;
+        while vertex + 3 <= end {
+            for corner in 1..3 {
+                let index = (vertex + corner) * 2;
+                points.push([wedge_vertices[index], wedge_vertices[index + 1]]);
+            }
+            vertex += 3;
+        }
+        let frame = if points.len() >= 2 {
+            oriented_frame(&points)
+        } else {
+            let quad = &cover_vertices[region_idx * 12..];
+            if quad.len() >= 12 {
+                oriented_frame(&[
+                    [quad[0], quad[1]],
+                    [quad[2], quad[3]],
+                    [quad[4], quad[5]],
+                    [quad[10], quad[11]],
+                ])
+            } else {
+                ShapeFrame::default()
+            }
+        };
+        frames.push(frame);
+    }
+    frames
+}
+
+/// Per-vertex oriented-frame attributes of the *shape* each triangle belongs
+/// to, for the minimum-visibility clamp of filled regions.
 ///
-/// Triangulation writes the triangles of one contour (or one flashed
-/// aperture) consecutively, and they share vertices with each other: the
-/// fan of a tessellated round pad shares its centre, the two halves of a
-/// rectangle share an edge. So consecutive triangles that share a vertex
-/// position are grouped into one shape and every vertex of the group gets
-/// the group's bounding box. Scaling a whole pad about one centre keeps its
-/// pieces together; scaling every sliver on its own would spread them out
-/// and count their coverage once per sliver.
+/// Triangles that share a vertex (bit-exact) belong to one shape: the fan of
+/// a tessellated round pad shares its centre, the halves of a rectangle share
+/// an edge, a triangulated region shares its contour points. Membership is a
+/// union over the whole array, so the order the triangulator emitted the
+/// triangles in does not matter. Two separate shapes are only merged when
+/// they touch at an identical coordinate, in which case they are enlarged
+/// together.
 struct TriangleRegionAttributes {
     center_x: Vec<f32>,
     center_y: Vec<f32>,
+    angle: Vec<f32>,
     half_width: Vec<f32>,
     half_height: Vec<f32>,
 }
 
 fn triangle_region_attributes(vertices: &[f32]) -> TriangleRegionAttributes {
-    let vertex_count = vertices.len() / 2;
+    let triangle_count = vertices.len() / 6;
     let mut region = TriangleRegionAttributes {
-        center_x: Vec::with_capacity(vertex_count),
-        center_y: Vec::with_capacity(vertex_count),
-        half_width: Vec::with_capacity(vertex_count),
-        half_height: Vec::with_capacity(vertex_count),
+        center_x: Vec::with_capacity(triangle_count * 3),
+        center_y: Vec::with_capacity(triangle_count * 3),
+        angle: Vec::with_capacity(triangle_count * 3),
+        half_width: Vec::with_capacity(triangle_count * 3),
+        half_height: Vec::with_capacity(triangle_count * 3),
     };
-    let push_group = |region: &mut TriangleRegionAttributes, group: &[f32]| {
-        let (cx, cy, hw, hh) = match vertex_bounds(group) {
-            Some([min_x, min_y, max_x, max_y]) => (
-                (min_x + max_x) * 0.5,
-                (min_y + max_y) * 0.5,
-                (max_x - min_x) * 0.5,
-                (max_y - min_y) * 0.5,
-            ),
-            // Degenerate input keeps its own geometry (scale stays 1).
-            None => (0.0, 0.0, 0.0, 0.0),
-        };
-        for _ in 0..group.len() / 2 {
-            region.center_x.push(cx);
-            region.center_y.push(cy);
-            region.half_width.push(hw);
-            region.half_height.push(hh);
+    // Union-find over triangles keyed by shared vertices.
+    let mut parent: Vec<usize> = (0..triangle_count).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
         }
-    };
-    let key = |x: f32, y: f32| (x.to_bits(), y.to_bits());
-    let mut group_start = 0usize;
-    let mut group_vertices: HashSet<(u32, u32)> = HashSet::new();
-    let mut offset = 0usize;
-    while offset + 6 <= vertices.len() {
-        let triangle = &vertices[offset..offset + 6];
-        let corners = [
-            key(triangle[0], triangle[1]),
-            key(triangle[2], triangle[3]),
-            key(triangle[4], triangle[5]),
-        ];
-        let touches =
-            group_vertices.is_empty() || corners.iter().any(|c| group_vertices.contains(c));
-        if !touches {
-            push_group(&mut region, &vertices[group_start..offset]);
-            group_start = offset;
-            group_vertices.clear();
-        }
-        group_vertices.extend(corners);
-        offset += 6;
+        i
     }
-    if group_start < vertices.len() {
-        push_group(&mut region, &vertices[group_start..]);
+    let mut owner: HashMap<(u32, u32), usize> = HashMap::new();
+    for triangle in 0..triangle_count {
+        for corner in 0..3 {
+            let x = vertices[triangle * 6 + corner * 2];
+            let y = vertices[triangle * 6 + corner * 2 + 1];
+            if !x.is_finite() || !y.is_finite() {
+                continue;
+            }
+            match owner.entry((x.to_bits(), y.to_bits())) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(triangle);
+                }
+                std::collections::hash_map::Entry::Occupied(slot) => {
+                    let a = find(&mut parent, *slot.get());
+                    let b = find(&mut parent, triangle);
+                    if a != b {
+                        parent[b] = a;
+                    }
+                }
+            }
+        }
+    }
+    let mut members: HashMap<usize, Vec<[f32; 2]>> = HashMap::new();
+    for triangle in 0..triangle_count {
+        let root = find(&mut parent, triangle);
+        let points = members.entry(root).or_default();
+        for corner in 0..3 {
+            points.push([
+                vertices[triangle * 6 + corner * 2],
+                vertices[triangle * 6 + corner * 2 + 1],
+            ]);
+        }
+    }
+    let frames: HashMap<usize, ShapeFrame> = members
+        .iter()
+        .map(|(root, points)| (*root, oriented_frame(points)))
+        .collect();
+    for triangle in 0..triangle_count {
+        let root = find(&mut parent, triangle);
+        let frame = frames.get(&root).copied().unwrap_or_default();
+        for _ in 0..3 {
+            region.center_x.push(frame.center[0]);
+            region.center_y.push(frame.center[1]);
+            region.angle.push(frame.angle);
+            region.half_width.push(frame.half_size[0]);
+            region.half_height.push(frame.half_size[1]);
+        }
     }
     region
 }

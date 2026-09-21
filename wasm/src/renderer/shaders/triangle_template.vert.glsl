@@ -10,6 +10,7 @@ uniform float minimum_feature_pixels;
 // world units. A macro whose shape sits away from the flash origin must be
 // scaled about its own centre, not about the flash point, or the pad moves.
 uniform vec2 template_center;
+uniform float template_angle;
 uniform vec2 template_half_size;
 out highp float vCoverage;
 
@@ -41,13 +42,22 @@ vec2 minimumScale(vec2 halfSize, float pixelsPerWorld) {
         halfSize.y > 0.000001 ? max(1.0, minimumHalf / halfSize.y) : 1.0);
 }
 
+
+// Rotate a vector by an angle (radians).
+vec2 rotateBy(vec2 v, float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
 void main() {
     // Minimum visibility: a flashed template narrower than the minimum is
-    // scaled up about its flash point, each axis on its own, so the pad
+    // scaled up about its own centre along its principal axes, so the pad
     // stays visible without a thin shape growing along its length.
     float pixelsPerWorld = max(weakestPixelsPerWorld(), 0.000001);
     vec2 scale = minimumScale(template_half_size, pixelsPerWorld);
-    vec2 worldPosition = template_center + (position - template_center) * scale
+    vec2 local = rotateBy(position - template_center, -template_angle) * scale;
+    vec2 worldPosition = template_center + rotateBy(local, template_angle)
         + vec2(instance_x, instance_y);
     vec3 transformed = transform * vec3(worldPosition, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);

@@ -264,3 +264,54 @@ test("pads held at the minimum width stay members of a composite", async ({ page
   expect(sourceInk.count).toBeGreaterThan(1000);
   expect(compositeInk.count).toBeGreaterThan(sourceInk.count * 0.8);
 });
+
+// A 10 mm x 0.002 mm bar drawn as a G36 region, rotated about the board
+// centre: far thinner than a pixel at any zoom, so only the minimum width
+// can make it visible, and only if that width is judged across the bar's
+// own thickness rather than the width and height of its bounding box.
+function rotatedBarGerber(degrees) {
+  const lines = ["G04 rotated thin bar*", "%FSLAX46Y46*%", "%MOMM*%", "%ADD99C,0.1*%", "G75*", "G01*", "%LPD*%"];
+  const radians = (degrees * Math.PI) / 180;
+  const corner = (u, v) => {
+    const x = 20 + u * Math.cos(radians) - v * Math.sin(radians);
+    const y = 18 + u * Math.sin(radians) + v * Math.cos(radians);
+    return point(x, y);
+  };
+  lines.push(
+    "G36*",
+    `${corner(-5, -0.001)}D02*`,
+    `${corner(5, -0.001)}D01*`,
+    `${corner(5, 0.001)}D01*`,
+    `${corner(-5, 0.001)}D01*`,
+    `${corner(-5, -0.001)}D01*`,
+    "G37*",
+    "D99*",
+  );
+  [[0, 0, "D02"], [0, 36, "D01"], [40, 36, "D01"], [40, 0, "D01"], [0, 0, "D01"]].forEach(([x, y, op]) =>
+    lines.push(`${point(x, y)}${op}*`),
+  );
+  lines.push("M02*");
+  return `${lines.join("\n")}\n`;
+}
+
+for (const degrees of [15, 30, 45, 60]) {
+  test(`minimum width keeps a thin bar rotated ${degrees} degrees visible`, async ({ page }) => {
+    await page.goto("/");
+    await page.locator("#file-input").setInputFiles({
+      name: "bar.gbr",
+      mimeType: "text/plain",
+      buffer: Buffer.from(rotatedBarGerber(degrees)),
+    });
+    await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+    await expect(page.locator("#visible-layer-count")).toHaveText("1 / 1");
+
+    await setMinimumVisibility(page, 0);
+    const inkOff = await ink(page);
+    await setMinimumVisibility(page, 2);
+    const inkTwoPixels = await ink(page);
+
+    // Off: at most a stray pixel or two of the bar besides the outline. With
+    // 2 px the whole 10 mm length shows (hundreds of pixels at fit zoom).
+    expect(inkTwoPixels.count - inkOff.count).toBeGreaterThan(150);
+  });
+}

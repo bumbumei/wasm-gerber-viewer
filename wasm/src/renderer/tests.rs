@@ -574,84 +574,115 @@ fn msaa_targets_only_sized_mask_formats() {
 }
 
 #[test]
-fn path_region_bounds_come_from_the_cover_quads() {
-    let cover = [
-        1.0, 2.0, 5.0, 2.0, 1.0, 8.0, 1.0, 8.0, 5.0, 2.0, 5.0, 8.0, // region 0
-        -3.0, -1.0, -2.0, -1.0, -3.0, 0.5, -3.0, 0.5, -2.0, -1.0, -2.0, 0.5, // region 1
-    ];
-    assert_eq!(
-        super::path_region_bounds_from_cover_quads(&cover),
-        vec![[1.0, 2.0, 5.0, 8.0], [-3.0, -1.0, -2.0, 0.5]]
+fn template_frame_is_centred_on_the_shape_not_the_flash_origin() {
+    // A macro whose 2 x 0.5 shape sits at x 1..3: scaling about the flash
+    // origin would move it, scaling about its own centre keeps it in place.
+    let offset_rectangle = [1.0, 0.0, 3.0, 0.0, 3.0, 0.5, 1.0, 0.0, 3.0, 0.5, 1.0, 0.5];
+    let frame = oriented_frame_of_vertices(&offset_rectangle);
+    assert!((frame.center[0] - 2.0).abs() < 1e-5 && (frame.center[1] - 0.25).abs() < 1e-5);
+    let mut halves = frame.half_size;
+    halves.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert!(
+        (halves[0] - 0.25).abs() < 1e-5 && (halves[1] - 1.0).abs() < 1e-5,
+        "{halves:?}"
     );
-    assert!(super::path_region_bounds_from_cover_quads(&cover[..11]).is_empty());
+    assert_eq!(oriented_frame_of_vertices(&[]), ShapeFrame::default());
 }
 
 #[test]
-fn template_bounds_center_is_the_bounding_box_centre() {
-    // A macro whose shape sits away from the flash origin, as an offset
-    // primitive 4 outline does.
-    let offset_square = [1.0, 0.0, 3.0, 0.0, 3.0, 0.5, 1.0, 0.0, 3.0, 0.5, 1.0, 0.5];
-    let (center, half_size) = triangle_bounds_center_and_half_size(&offset_square);
-    assert_eq!(center, [2.0, 0.25]);
-    assert_eq!(half_size, [1.0, 0.25]);
-    assert_eq!(
-        triangle_bounds_center_and_half_size(&[]),
-        ([0.0, 0.0], [0.0, 0.0])
+fn oriented_frame_follows_a_rotated_bar() {
+    // A 10 x 0.01 bar rotated by 30 degrees: an axis-aligned box would call
+    // it about 8.7 x 5, its own frame is 10 x 0.01.
+    let (sin, cos) = 30.0f64.to_radians().sin_cos();
+    let corners: Vec<[f32; 2]> = [[-5.0, -0.005], [5.0, -0.005], [5.0, 0.005], [-5.0, 0.005]]
+        .iter()
+        .map(|[x, y]: &[f64; 2]| {
+            [
+                (x * cos - y * sin) as f32 + 3.0,
+                (x * sin + y * cos) as f32 - 2.0,
+            ]
+        })
+        .collect();
+    let frame = oriented_frame(&corners);
+    let mut halves = frame.half_size;
+    halves.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert!((halves[0] - 0.005).abs() < 1e-4, "{halves:?}");
+    assert!((halves[1] - 5.0).abs() < 1e-3, "{halves:?}");
+    assert!((frame.center[0] - 3.0).abs() < 1e-4 && (frame.center[1] + 2.0).abs() < 1e-4);
+    let angle_mod = frame.angle.rem_euclid(std::f32::consts::PI);
+    assert!(
+        (angle_mod - 30.0f32.to_radians()).abs() < 1e-3
+            || (angle_mod - 120.0f32.to_radians()).abs() < 1e-3,
+        "{}",
+        frame.angle
     );
+    // Degenerate input stays unscaled.
+    assert_eq!(oriented_frame(&[[0.0, f32::NAN]]), ShapeFrame::default());
+    assert_eq!(oriented_frame(&[]), ShapeFrame::default());
+    let point = oriented_frame(&[[4.0, 4.0]]);
+    assert_eq!(point.half_size, [0.0, 0.0]);
 }
 
 #[test]
-fn triangle_bounds_half_size_follows_the_bounding_box() {
-    // A 2 x 0.4 rectangle as two triangles.
-    let thin = [
-        -1.0, -0.2, 1.0, -0.2, 1.0, 0.2, //
-        -1.0, -0.2, 1.0, 0.2, -1.0, 0.2,
-    ];
-    let [hw, hh] = triangle_bounds_center_and_half_size(&thin).1;
-    assert!((hw - 1.0).abs() < 1e-6 && (hh - 0.2).abs() < 1e-6);
-    assert_eq!(triangle_bounds_center_and_half_size(&[]).1, [0.0, 0.0]);
-    assert_eq!(
-        triangle_bounds_center_and_half_size(&[0.0, f32::NAN, 1.0, 1.0]).1,
-        [0.0, 0.0]
+fn path_region_frames_use_the_contour_points() {
+    // One region: wedge fans (reference, start, end) around a 4 x 6 rectangle
+    // at (3, 5); the reference corner sits outside and must not count.
+    let reference = [0.9, 1.9];
+    let corners = [[1.0, 2.0], [5.0, 2.0], [5.0, 8.0], [1.0, 8.0]];
+    let mut wedges = Vec::new();
+    for i in 0..4 {
+        let a = corners[i];
+        let b = corners[(i + 1) % 4];
+        wedges.extend_from_slice(&[reference[0], reference[1], a[0], a[1], b[0], b[1]]);
+    }
+    let cover = [1.0, 2.0, 5.0, 2.0, 1.0, 8.0, 1.0, 8.0, 5.0, 2.0, 5.0, 8.0];
+    let frames = super::path_region_frames(&wedges, &[0, 12], &cover);
+    assert_eq!(frames.len(), 1);
+    let mut halves = frames[0].half_size;
+    halves.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert!(
+        (halves[0] - 2.0).abs() < 1e-4 && (halves[1] - 3.0).abs() < 1e-4,
+        "{halves:?}"
     );
+    assert!((frames[0].center[0] - 3.0).abs() < 1e-4 && (frames[0].center[1] - 5.0).abs() < 1e-4);
+    // No wedges: the cover quad stands in.
+    let fallback = super::path_region_frames(&[], &[0, 0], &cover);
+    assert_eq!(fallback.len(), 1);
+    assert!((fallback[0].center[0] - 3.0).abs() < 1e-4);
+    assert!(super::path_region_frames(&[], &[0], &cover).is_empty());
 }
 
 #[test]
-fn triangle_region_attributes_group_touching_triangles_into_one_shape() {
-    // A fan of three slivers around (10, 20) (a tessellated pad), then a
-    // separate quad at (30, 30) made of two triangles sharing an edge.
+fn triangle_region_attributes_group_shapes_regardless_of_order() {
+    // Two triangles of a 2 x 4 quad at (31, 32) with an unrelated fan sliver
+    // emitted between them, then the rest of the fan around (10, 20).
     let vertices = [
-        10.0, 20.0, 11.0, 20.0, 11.0, 21.0, //
-        10.0, 20.0, 11.0, 21.0, 10.0, 21.0, //
-        10.0, 20.0, 10.0, 21.0, 9.0, 21.0, //
-        30.0, 30.0, 32.0, 30.0, 32.0, 34.0, //
-        30.0, 30.0, 32.0, 34.0, 30.0, 34.0,
+        30.0, 30.0, 32.0, 30.0, 32.0, 34.0, // quad half A
+        10.0, 20.0, 11.0, 20.0, 11.0, 21.0, // fan sliver
+        30.0, 30.0, 32.0, 34.0, 30.0, 34.0, // quad half B (shares an edge with A)
+        10.0, 20.0, 11.0, 21.0, 10.0, 21.0, // fan
+        10.0, 20.0, 10.0, 21.0, 9.0, 21.0, // fan
     ];
     let region = triangle_region_attributes(&vertices);
     assert_eq!(region.center_x.len(), 15);
-    // The fan spans x 9..11, y 20..21 as one shape.
-    assert!(region.center_x[..9]
-        .iter()
-        .all(|v| (*v - 10.0).abs() < 1e-6));
-    assert!(region.center_y[..9]
-        .iter()
-        .all(|v| (*v - 20.5).abs() < 1e-6));
-    assert!(region.half_width[..9]
-        .iter()
-        .all(|v| (*v - 1.0).abs() < 1e-6));
-    assert!(region.half_height[..9]
-        .iter()
-        .all(|v| (*v - 0.5).abs() < 1e-6));
-    // The quad is its own shape: 2 x 4 about (31, 32).
-    assert!(region.center_x[9..]
-        .iter()
-        .all(|v| (*v - 31.0).abs() < 1e-6));
-    assert!(region.half_width[9..]
-        .iter()
-        .all(|v| (*v - 1.0).abs() < 1e-6));
-    assert!(region.half_height[9..]
-        .iter()
-        .all(|v| (*v - 2.0).abs() < 1e-6));
+    // Both quad halves carry the same frame: centre (31, 32), extents 1 and 2.
+    for vertex in [0, 1, 2, 6, 7, 8] {
+        assert!((region.center_x[vertex] - 31.0).abs() < 1e-4);
+        assert!((region.center_y[vertex] - 32.0).abs() < 1e-4);
+        let mut halves = [region.half_width[vertex], region.half_height[vertex]];
+        halves.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!(
+            (halves[0] - 1.0).abs() < 1e-4 && (halves[1] - 2.0).abs() < 1e-4,
+            "{halves:?}"
+        );
+    }
+    // The three fan slivers share one frame too, distinct from the quad's.
+    let fan = [3, 4, 5, 9, 10, 11, 12, 13, 14];
+    for vertex in fan {
+        assert!((region.center_x[vertex] - region.center_x[3]).abs() < 1e-6);
+        assert!((region.half_width[vertex] - region.half_width[3]).abs() < 1e-6);
+        assert!((region.center_x[vertex] - 31.0).abs() > 1.0);
+    }
     // Degenerate input scales by 1.
     let sliver = triangle_region_attributes(&[0.0, 0.0, f32::NAN, 1.0, 1.0, 1.0]);
     assert_eq!(sliver.half_width, vec![0.0, 0.0, 0.0]);

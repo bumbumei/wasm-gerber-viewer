@@ -171,6 +171,7 @@ impl ShaderPrograms {
                 "hole_radius_instance",
                 "region_center_x",
                 "region_center_y",
+                "region_angle",
                 "region_half_width",
                 "region_half_height",
             ],
@@ -195,6 +196,7 @@ impl ShaderPrograms {
                 "viewport_size",
                 "minimum_feature_pixels",
                 "template_center",
+                "template_angle",
                 "template_half_size",
             ],
         )?;
@@ -331,6 +333,7 @@ impl ShaderPrograms {
                 "viewport_size",
                 "minimum_feature_pixels",
                 "region_center",
+                "region_angle",
                 "region_half_size",
             ],
         )?;
@@ -346,6 +349,7 @@ impl ShaderPrograms {
                 "viewport_size",
                 "minimum_feature_pixels",
                 "region_center",
+                "region_angle",
                 "region_half_size",
             ],
         )?;
