@@ -13,12 +13,18 @@ uniform sampler2D u_source7;
 uniform int u_source_count;
 uniform int u_base_slot;
 uniform int u_red_source_mask;
+// Sources whose mask keeps the geometry's presence in green (RG8 layer masks
+// and the RGBA fallback): red/alpha there hold the displayed coverage, which
+// the minimum feature width lowers below 0.5 for enlarged pads.
+uniform int u_green_source_mask;
 
 out highp vec4 fragColor;
 
 bool covered(sampler2D source_texture, ivec2 pixel, int local_slot) {
     vec4 texel_value = texelFetch(source_texture, pixel, 0);
-    float coverage = (u_red_source_mask & (1 << local_slot)) != 0 ? texel_value.r : texel_value.a;
+    float coverage = (u_green_source_mask & (1 << local_slot)) != 0
+        ? texel_value.g
+        : ((u_red_source_mask & (1 << local_slot)) != 0 ? texel_value.r : texel_value.a);
     return coverage >= 0.5;
 }
 

@@ -25,8 +25,10 @@ void main() {
         alpha = dist <= 1.0 && dist >= vInnerRadius ? 1.0 : 0.0;
     }
     if (alpha <= 0.0) discard;
-    // Red carries the shape's own edge coverage (composite membership tests
-    // it against 0.5), alpha the displayed coverage after the minimum-width
-    // compensation, so a pad held at the minimum stays a composite member.
-    fragColor = vec4(color.rgb * alpha, color.a * vCoverage * alpha);
+    // Red (and alpha) carry the displayed coverage after the minimum-width
+    // compensation; green carries the shape's own edge coverage, which
+    // composite membership tests against 0.5, so a pad held at the minimum
+    // stays a composite member although it is drawn dim.
+    float displayed = vCoverage * alpha;
+    fragColor = vec4(color.r * displayed, color.g * alpha, color.b * alpha, color.a * displayed);
 }

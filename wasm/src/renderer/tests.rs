@@ -567,10 +567,24 @@ fn msaa_targets_only_sized_mask_formats() {
         Some(WebGl2RenderingContext::R8)
     );
     assert_eq!(
+        Renderer::msaa_internal_format("RG8"),
+        Some(WebGl2RenderingContext::RG8)
+    );
+    assert_eq!(
         Renderer::msaa_internal_format("RGBA8"),
         Some(WebGl2RenderingContext::RGBA8)
     );
     assert_eq!(Renderer::msaa_internal_format("RGBA"), None);
+}
+
+#[test]
+fn mask_formats_route_display_and_presence_channels() {
+    assert!(mask_format_displays_in_red("R8"));
+    assert!(mask_format_displays_in_red("RG8"));
+    assert!(!mask_format_displays_in_red("RGBA8"));
+    assert!(mask_format_keeps_presence_in_green("RG8"));
+    assert!(mask_format_keeps_presence_in_green("RGBA8"));
+    assert!(!mask_format_keeps_presence_in_green("R8"));
 }
 
 #[test]

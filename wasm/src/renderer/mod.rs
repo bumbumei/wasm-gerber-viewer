@@ -1358,7 +1358,7 @@ impl Renderer {
 
         // R8 allocation may have fallen back to RGBA8. Keep the sampling and
         // polarity mode coupled to the format that was actually created.
-        let actual_mask_in_red = fbo.color_format == "R8";
+        let actual_mask_in_red = mask_format_displays_in_red(fbo.color_format);
         let layer_metadata = LayerMetadata {
             gerber_data,
             fbo,
@@ -3065,7 +3065,7 @@ impl Renderer {
                 return Err(error);
             }
         };
-        let mask_in_red = fbo.color_format == "R8";
+        let mask_in_red = mask_format_displays_in_red(fbo.color_format);
 
         let layer_metadata = LayerMetadata {
             gerber_data,
@@ -5182,19 +5182,42 @@ impl Renderer {
 
     /// General Gerber layers retain their historic linear RGBA fallback while
     /// preferring an R8 coverage attachment whenever the driver supports it.
+    /// Gerber layer masks carry two channels: red is the displayed coverage
+    /// (after the minimum-feature-width compensation) and green the geometry's
+    /// own edge coverage for composite membership. RG8 keeps that at two bytes
+    /// per pixel; the historic linear RGBA fallback (display in alpha,
+    /// presence in green) stands in where RG8 attachments are unsupported.
     fn create_layer_mask_fbo(
         gl: &WebGl2RenderingContext,
         width: u32,
         height: u32,
         with_stencil: bool,
     ) -> Result<Fbo, JsValue> {
-        Self::create_red_mask_fbo_with_fallback_filter(
+        match Self::create_fbo_with_format(
             gl,
             width,
             height,
             with_stencil,
-            WebGl2RenderingContext::LINEAR,
-        )
+            WebGl2RenderingContext::RG8 as i32,
+            WebGl2RenderingContext::RG,
+            WebGl2RenderingContext::NEAREST,
+        ) {
+            Ok(fbo) => Ok(fbo),
+            Err(FboBuildError::UnsupportedFormat(_)) => {
+                Self::drain_gl_errors(gl);
+                Self::create_fbo_with_format(
+                    gl,
+                    width,
+                    height,
+                    with_stencil,
+                    WebGl2RenderingContext::RGBA8 as i32,
+                    WebGl2RenderingContext::RGBA,
+                    WebGl2RenderingContext::LINEAR,
+                )
+                .map_err(FboBuildError::into_js_value)
+            }
+            Err(FboBuildError::Fatal(error)) => Err(error),
+        }
     }
 
     fn create_red_mask_fbo_with_fallback_filter(
@@ -5270,7 +5293,18 @@ impl Renderer {
         // allocation, without snapshotting every texture unit for successful
         // layer creation, resize, or context recovery.
         let mut bindings = FboBuildBindingGuard::capture(gl).map_err(FboBuildError::Fatal)?;
-        let is_r8 = internal_format == WebGl2RenderingContext::R8 as i32;
+        // Single- and two-channel formats may be unsupported as attachments
+        // and fall back to RGBA8; the caller decides.
+        let is_r8 = internal_format == WebGl2RenderingContext::R8 as i32
+            || internal_format == WebGl2RenderingContext::RG8 as i32;
+        let (color_bytes_per_pixel, color_format): (usize, &'static str) =
+            if internal_format == WebGl2RenderingContext::R8 as i32 {
+                (1, "R8")
+            } else if internal_format == WebGl2RenderingContext::RG8 as i32 {
+                (2, "RG8")
+            } else {
+                (4, "RGBA8")
+            };
         let fatal = FboBuildError::Fatal;
         if width == 0 || height == 0 {
             return Err(fatal(JsValue::from_str(
@@ -5398,10 +5432,7 @@ impl Renderer {
         gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
         gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
 
-        let fbo = pending.commit(
-            if is_r8 { 1 } else { 4 },
-            if is_r8 { "R8" } else { "RGBA8" },
-        );
+        let fbo = pending.commit(color_bytes_per_pixel, color_format);
         // Preserve the historical successful-build state cleanup above; the
         // binding snapshot is solely failure rollback.
         bindings.disarm();
@@ -5781,6 +5812,18 @@ impl Renderer {
                 .and_then(|composite| composite.output_fbo.as_ref())
                 .map(|fbo| fbo.texture.clone())
                 .ok_or_else(|| JsValue::from_str("Composite mask texture is unavailable")),
+        }
+    }
+
+    /// Whether a membership source keeps the geometry's presence in green
+    /// (Gerber layer masks); composite outputs and internal outline masks are
+    /// binary and read through their display channel.
+    fn mask_source_presence_in_green(&self, source: ResolvedMaskSource) -> Result<bool, JsValue> {
+        match source.kind() {
+            MaskSourceKind::Gerber => Ok(mask_format_keeps_presence_in_green(
+                self.get_layer(source.layer_id())?.fbo.color_format,
+            )),
+            MaskSourceKind::InternalOutline | MaskSourceKind::Composite => Ok(false),
         }
     }
 
@@ -7849,17 +7892,19 @@ impl Renderer {
             // polarity keeps the additive erase.
             self.gl.enable(BLEND);
             if mask_in_red && is_negative {
-                // R8 masks accumulate polarity in red rather than alpha.
-                // Clear coverage erases destination red.
-                self.gl.blend_func(ZERO, ONE_MINUS_SRC_ALPHA);
+                // Red masks accumulate polarity in their colour channels: the
+                // displayed coverage in red and, for RG8, the presence in
+                // green. Clear geometry erases each channel by its own value.
+                self.gl
+                    .blend_func(ZERO, WebGl2RenderingContext::ONE_MINUS_SRC_COLOR);
                 self.gl.blend_equation(FUNC_ADD);
             } else if mask_in_red {
                 self.gl.blend_func(ONE, ONE);
                 self.gl.blend_equation(WebGl2RenderingContext::MAX);
             } else if is_negative {
-                // Negative polarity: erase the presence (red) by the shape's
-                // edge coverage and the displayed coverage (alpha) by the
-                // compensated coverage.
+                // RGBA fallback, negative polarity: erase the displayed
+                // coverage (red, alpha) and the presence (green) each by the
+                // shape's own value.
                 self.gl.blend_func_separate(
                     ZERO,
                     WebGl2RenderingContext::ONE_MINUS_SRC_COLOR,
@@ -7868,9 +7913,9 @@ impl Renderer {
                 );
                 self.gl.blend_equation(FUNC_ADD);
             } else {
-                // Positive polarity: red is the union of the shapes' own edge
-                // coverage (composite membership), alpha the union of the
-                // displayed coverage.
+                // RGBA fallback, positive polarity: every channel is the union
+                // of what the shapes wrote (displayed coverage in red/alpha,
+                // presence in green).
                 self.gl.blend_func_separate(ONE, ONE, ONE, ONE);
                 self.gl.blend_equation(WebGl2RenderingContext::MAX);
             }
@@ -9352,6 +9397,7 @@ impl Renderer {
     fn msaa_internal_format(color_format: &str) -> Option<u32> {
         match color_format {
             "R8" => Some(WebGl2RenderingContext::R8),
+            "RG8" => Some(WebGl2RenderingContext::RG8),
             "RGBA8" => Some(WebGl2RenderingContext::RGBA8),
             _ => None,
         }
@@ -9715,9 +9761,11 @@ impl Renderer {
         let mut source_textures: [Option<WebGlTexture>; MAX_COMPOSITE_SOURCES] =
             std::array::from_fn(|_| None);
         let mut source_is_red = [false; MAX_COMPOSITE_SOURCES];
+        let mut source_presence_in_green = [false; MAX_COMPOSITE_SOURCES];
         for (index, source) in sources[..source_count].iter().copied().enumerate() {
             source_textures[index] = Some(self.mask_source_texture(source)?);
             source_is_red[index] = self.mask_source_is_red(source)?;
+            source_presence_in_green[index] = self.mask_source_presence_in_green(source)?;
         }
         let scratch = self
             .membership_scratch
@@ -9758,9 +9806,13 @@ impl Renderer {
             {
                 let batch_start = batch_index * batch_size;
                 let mut red_source_mask = 0i32;
+                let mut green_source_mask = 0i32;
                 for local_slot in 0..batch.len() {
                     if source_is_red[batch_start + local_slot] {
                         red_source_mask |= 1 << local_slot;
+                    }
+                    if source_presence_in_green[batch_start + local_slot] {
+                        green_source_mask |= 1 << local_slot;
                     }
                 }
                 for local_slot in 0..8usize {
@@ -9788,6 +9840,10 @@ impl Renderer {
                     .uniform1i(program.uniforms.get("u_base_slot"), batch_start as i32);
                 self.gl
                     .uniform1i(program.uniforms.get("u_red_source_mask"), red_source_mask);
+                self.gl.uniform1i(
+                    program.uniforms.get("u_green_source_mask"),
+                    green_source_mask,
+                );
                 self.gl.draw_arrays(TRIANGLES, 0, 6);
                 completed_passes += 1;
             }
@@ -10143,7 +10199,7 @@ impl Renderer {
         }
         for (layer, replacement) in self.layers.iter_mut().zip(replacements) {
             if let (Some(layer), Some(replacement)) = (layer, replacement) {
-                layer.mask_in_red = replacement.color_format == "R8";
+                layer.mask_in_red = mask_format_displays_in_red(replacement.color_format);
                 let old_fbo = std::mem::replace(&mut layer.fbo, replacement);
                 Self::delete_fbo(&self.gl, old_fbo);
                 layer.fbo_dirty = true;
@@ -10260,7 +10316,7 @@ impl Renderer {
             self.layers.iter_mut().zip(new_fbos).zip(new_buffer_caches)
         {
             if let (Some(layer), Some(new_fbo), Some(new_caches)) = (layer, new_fbo, new_caches) {
-                layer.mask_in_red = new_fbo.color_format == "R8";
+                layer.mask_in_red = mask_format_displays_in_red(new_fbo.color_format);
                 let old_fbo = std::mem::replace(&mut layer.fbo, new_fbo);
                 Self::delete_fbo(&old_gl, old_fbo);
 
@@ -10320,6 +10376,20 @@ impl Drop for Renderer {
         self.gl.delete_buffer(Some(&self.quad_buffer));
         Self::delete_shader_programs(&self.gl, &self.programs);
     }
+}
+
+/// Masks whose display coverage lives in red: R8 (internal outline masks,
+/// composite outputs) and RG8 (Gerber layer masks). RGBA fallbacks display
+/// through alpha.
+fn mask_format_displays_in_red(color_format: &str) -> bool {
+    matches!(color_format, "R8" | "RG8")
+}
+
+/// Masks that keep the geometry's own edge coverage in green next to the
+/// displayed coverage, for composite membership: RG8 layer masks and the
+/// RGBA layer fallback. R8 masks have one channel and are binary anyway.
+fn mask_format_keeps_presence_in_green(color_format: &str) -> bool {
+    matches!(color_format, "RG8" | "RGBA8")
 }
 
 /// Oriented frame of a point set: the mean is the pivot, the principal axis of

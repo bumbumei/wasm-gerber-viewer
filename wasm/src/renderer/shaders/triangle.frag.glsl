@@ -22,5 +22,6 @@ void main() {
         if (alpha <= 0.0) discard;
     }
     // Red: edge coverage for composite membership; alpha: displayed coverage.
-    fragColor = vec4(color.rgb * alpha, color.a * vCoverage * alpha);
+    float displayed = vCoverage * alpha;
+    fragColor = vec4(color.r * displayed, color.g * alpha, color.b * alpha, color.a * displayed);
 }
