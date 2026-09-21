@@ -32,7 +32,8 @@ Options:
   --background <color>             Background color, e.g. #05070c (default: transparent)
   --alpha <0-1>                    Blend-mode Gerber alpha (default: 0.7)
   --composite-mode <blend|stack>   blend=additive, stack=ordered source-over
-  --minimum-feature-pixels <px>    Minimum line/arc display width (default: 1)
+  --minimum-feature-pixels <px>    Minimum feature display width (default: 1)
+  --anti-aliasing                  Anti-aliased layer masks (4x MSAA + analytic edges; default: off)
   --max-render-target-bytes <size> Per-render target memory cap, e.g. 2g, 512m
   --max-band-bytes <size>          Streamed PNG row-buffer cap, e.g. 512m
   --max-full-frame-bytes <size>    Full-frame PNG memory cap, e.g. 512m
@@ -236,6 +237,8 @@ function parseArgs(args) {
       frameOptions.compositeMode = readCompositeMode(args, ++index, arg);
     } else if (arg === "--minimum-feature-pixels") {
       frameOptions.minimumFeaturePixels = readNumber(args, ++index, arg);
+    } else if (arg === "--anti-aliasing") {
+      frameOptions.antiAliasing = true;
     } else if (arg === "--max-render-target-bytes") {
       frameOptions.maxRenderTargetBytes = readByteSize(args, ++index, arg);
     } else if (arg === "--max-band-bytes") {

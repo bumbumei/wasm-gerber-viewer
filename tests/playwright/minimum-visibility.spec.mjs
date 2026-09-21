@@ -186,3 +186,30 @@ test("the BGA test patterns demo loads with every array visible", async ({ page 
   // far more ink than the 125 x 80 mm outline alone (about 1,300 pixels).
   expect(await inkPixels(page)).toBeGreaterThan(20_000);
 });
+
+test("anti-aliasing is off by default and adds edge coverage when enabled", async ({ page }) => {
+  await page.goto("/");
+  await page
+    .locator("#file-input")
+    .setInputFiles(fileURLToPath(new URL("../../demo/bga-test-patterns.gbr", import.meta.url)));
+  await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+  await expect(page.locator("#visible-layer-count")).toHaveText("1 / 1");
+
+  await page.locator("[data-panel-tab='options']").click();
+  await expect(page.locator("#anti-aliasing-off")).toBeChecked();
+  const inkOff = await ink(page);
+
+  await page.locator("#anti-aliasing-on").check({ force: true });
+  await page.waitForTimeout(400);
+  const inkOn = await ink(page);
+
+  // Point sampling lights whole pixels; anti-aliasing adds partially covered
+  // edge pixels around every pad and outline, so more pixels differ from the
+  // background while the picture stays the same shapes.
+  expect(inkOn.count).toBeGreaterThan(inkOff.count * 1.1);
+  expect(inkOn.sum).toBeGreaterThan(0);
+
+  await page.locator("#anti-aliasing-off").check({ force: true });
+  await page.waitForTimeout(400);
+  expect((await ink(page)).count).toBe(inkOff.count);
+});
