@@ -27,9 +27,9 @@ import {
   isOdbFileList,
   isOdbZip,
   readTarArchive,
-} from "./odb/index.js";
+} from "../src/odb/index.js";
 
-export { getInitialOdbStepName } from "./odb/index.js";
+export { getInitialOdbStepName } from "../src/odb/index.js";
 
 const UNKNOWN_ZIP_LAYER_SNIFF_LINES = 30;
 
@@ -332,6 +332,23 @@ async function collectZipLayerSources(file, callbacks = {}) {
       );
     }
 
+    // Some CAD exporters wrap an ODB++ TAR/TGZ job with release documents in
+    // an outer ZIP. Prefer the embedded job when there is exactly one archive
+    // candidate, rather than treating the wrapper as a generic ZIP.
+    const nestedOdbArchives = archiveEntries.filter(
+      (entry) => !entry.dir && isOdbArchiveFile({ name: entry.name }),
+    );
+    if (nestedOdbArchives.length === 1) {
+      const nested = nestedOdbArchives[0];
+      const nestedFile = createZipArchiveFile(nested);
+      const { tree } = await readTarArchive(nestedFile, odbTreeOptions(callbacks));
+      if (tree.isOdbJob) {
+        return await collectOdbSources(tree, `${file.name}/${nested.name}`, callbacks, {
+          rethrow: true,
+        });
+      }
+    }
+
     return await collectArchiveEntrySources(archiveEntries, file.name, callbacks);
   } catch (error) {
     onArchiveError(file.name, error);
@@ -430,6 +447,17 @@ function createTarPseudoZipEntry(entry) {
     async async(type, onProgress) {
       onProgress?.({ percent: 100 });
       return type === "uint8array" ? entry.bytes : decodeZipEntryText(entry.bytes);
+    },
+  };
+}
+
+/** Expose a ZIP entry through the minimal File surface needed by TAR loading. */
+function createZipArchiveFile(entry) {
+  return {
+    name: getBaseFileName(entry.name),
+    async arrayBuffer() {
+      const bytes = await readZipEntryBytes(entry);
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     },
   };
 }

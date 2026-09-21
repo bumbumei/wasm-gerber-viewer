@@ -318,7 +318,7 @@ impl ShaderPrograms {
             TEXTURE_VERTEX_SHADER,
             TEXTURE_FRAGMENT_SHADER,
             &["position"],
-            &["u_texture", "u_color"],
+            &["u_texture", "u_color", "u_mask_is_red"],
         )?;
         pending.track(&texture);
 
@@ -371,6 +371,7 @@ impl ShaderPrograms {
                 "u_source7",
                 "u_source_count",
                 "u_base_slot",
+                "u_red_source_mask",
             ],
         )?;
         pending.track(&composite_membership);
@@ -386,6 +387,7 @@ impl ShaderPrograms {
                 "u_outline",
                 "u_lookup_width",
                 "u_inverted",
+                "u_outline_is_red",
             ],
         )?;
         pending.track(&composite_lookup);
@@ -395,7 +397,13 @@ impl ShaderPrograms {
             TEXTURE_VERTEX_SHADER,
             COMPOSITE_PREVIEW_FRAGMENT_SHADER,
             &["position"],
-            &["u_membership", "u_lookup", "u_outline", "u_lookup_width"],
+            &[
+                "u_membership",
+                "u_lookup",
+                "u_outline",
+                "u_lookup_width",
+                "u_outline_is_red",
+            ],
         )?;
         pending.track(&composite_preview);
 
@@ -409,6 +417,7 @@ impl ShaderPrograms {
                 "u_outline",
                 "u_selected_code",
                 "u_clip_to_outline",
+                "u_outline_is_red",
             ],
         )?;
         pending.track(&composite_highlight);
