@@ -624,6 +624,47 @@ fn oriented_frame_follows_a_rotated_bar() {
 }
 
 #[test]
+fn path_region_frames_follow_a_rotated_contour() {
+    // One region: wedge fans (reference, start, end) around a 10 x 0.01 bar
+    // rotated by 30 degrees; the reference corner sits outside the shape
+    // and must not count. The cover quad (axis-aligned) is only a fallback.
+    let (sin, cos) = 30.0f64.to_radians().sin_cos();
+    let corners: Vec<[f32; 2]> = [[-5.0, -0.005], [5.0, -0.005], [5.0, 0.005], [-5.0, 0.005]]
+        .iter()
+        .map(|[x, y]: &[f64; 2]| {
+            [
+                (x * cos - y * sin) as f32 + 3.0,
+                (x * sin + y * cos) as f32 - 2.0,
+            ]
+        })
+        .collect();
+    let reference = [-3.0, -6.0];
+    let mut wedges = Vec::new();
+    for i in 0..4 {
+        let a = corners[i];
+        let b = corners[(i + 1) % 4];
+        wedges.extend_from_slice(&[reference[0], reference[1], a[0], a[1], b[0], b[1]]);
+    }
+    let cover = [
+        -2.0, -5.0, 8.0, -5.0, -2.0, 1.0, -2.0, 1.0, 8.0, -5.0, 8.0, 1.0,
+    ];
+    let frames = super::path_region_frames(&wedges, &[0, 12], &cover);
+    assert_eq!(frames.len(), 1);
+    let mut halves = frames[0].half_size;
+    halves.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert!(
+        (halves[0] - 0.005).abs() < 1e-4 && (halves[1] - 5.0).abs() < 1e-3,
+        "{halves:?}"
+    );
+    assert!((frames[0].center[0] - 3.0).abs() < 1e-4 && (frames[0].center[1] + 2.0).abs() < 1e-4);
+    // No wedges: the cover quad stands in.
+    let fallback = super::path_region_frames(&[], &[0, 0], &cover);
+    assert_eq!(fallback.len(), 1);
+    assert_eq!(fallback[0].center, [3.0, -2.0]);
+    assert!(super::path_region_frames(&[], &[0], &cover).is_empty());
+}
+
+#[test]
 fn path_region_frames_come_from_the_cover_quads() {
     let cover = [
         1.0, 2.0, 5.0, 2.0, 1.0, 8.0, 1.0, 8.0, 5.0, 2.0, 5.0, 8.0, // region 0

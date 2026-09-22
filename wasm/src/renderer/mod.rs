@@ -1255,6 +1255,10 @@ impl Renderer {
         if !enabled {
             self.release_msaa_target();
         }
+        // A size-specific allocation failure was about the memory available
+        // then; switching the option off and on is a request to try again.
+        // Formats this context cannot multisample stay unsupported.
+        self.msaa_failed_size = None;
         self.mark_all_layers_dirty();
     }
 
@@ -3862,8 +3866,11 @@ impl Renderer {
                 ));
             }
             Self::validate_js_finite_array("path region cover vertices", &cover_vertices)?;
-            buffer_cache.path_region_frames =
-                path_region_frames_from_cover_quads(&cover_vertices.to_vec());
+            buffer_cache.path_region_frames = path_region_frames(
+                &wedge_vertices.to_vec(),
+                &Self::js_u32_array(&path_regions, "wedgeVertexOffsets")?.to_vec(),
+                &cover_vertices.to_vec(),
+            );
             let vao = self
                 .gl
                 .create_vertex_array()
@@ -7543,8 +7550,11 @@ impl Renderer {
             buffer_cache.path_sector_vertex_buffer = Some(buffer);
         }
 
-        buffer_cache.path_region_frames =
-            path_region_frames_from_cover_quads(&path_regions.cover_vertices);
+        buffer_cache.path_region_frames = path_region_frames(
+            &path_regions.wedge_vertices,
+            &path_regions.wedge_vertex_offsets,
+            &path_regions.cover_vertices,
+        );
         if !path_regions.cover_vertices.is_empty() {
             buffer_cache.path_cover_vertex_count = Self::checked_usize_to_i32(
                 "path region cover vertex count",
@@ -7670,6 +7680,9 @@ impl Renderer {
         if let Some(loc) = program.uniforms.get("region_center") {
             self.gl
                 .uniform2f(Some(loc), frame.center[0], frame.center[1]);
+        }
+        if let Some(loc) = program.uniforms.get("region_angle") {
+            self.gl.uniform1f(Some(loc), frame.angle);
         }
         if let Some(loc) = program.uniforms.get("region_half_size") {
             self.gl
@@ -10305,6 +10318,42 @@ fn oriented_frame(points: &[[f32; 2]]) -> ShapeFrame {
 fn oriented_frame_of_vertices(vertices: &[f32]) -> ShapeFrame {
     let points: Vec<[f32; 2]> = vertices.chunks_exact(2).map(|p| [p[0], p[1]]).collect();
     oriented_frame(&points)
+}
+
+/// One oriented frame per path region from the region's own contour points,
+/// so a thin slot is measured across its thickness whatever its rotation. The
+/// wedge triangles of a region are `(reference, start, end)` fans, so every
+/// vertex but the first of each triangle lies on the contour; a region
+/// without straight segments (a lone full circle) falls back to its cover
+/// quad. Computed once when the GPU cache is built, 20 bytes per region.
+fn path_region_frames(
+    wedge_vertices: &[f32],
+    wedge_vertex_offsets: &[u32],
+    cover_vertices: &[f32],
+) -> Vec<ShapeFrame> {
+    let fallback = path_region_frames_from_cover_quads(cover_vertices);
+    let region_count = wedge_vertex_offsets.len().saturating_sub(1);
+    let mut frames = Vec::with_capacity(region_count);
+    let mut points: Vec<[f32; 2]> = Vec::new();
+    for region_idx in 0..region_count {
+        let start = wedge_vertex_offsets[region_idx] as usize;
+        let end = (wedge_vertex_offsets[region_idx + 1] as usize).min(wedge_vertices.len() / 2);
+        points.clear();
+        let mut vertex = start;
+        while vertex + 3 <= end {
+            for corner in 1..3 {
+                let index = (vertex + corner) * 2;
+                points.push([wedge_vertices[index], wedge_vertices[index + 1]]);
+            }
+            vertex += 3;
+        }
+        frames.push(if points.len() >= 2 {
+            oriented_frame(&points)
+        } else {
+            fallback.get(region_idx).copied().unwrap_or_default()
+        });
+    }
+    frames
 }
 
 /// One axis-aligned frame per path region from its cover quad, whose six

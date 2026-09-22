@@ -300,3 +300,54 @@ for (const degrees of [15, 30, 45, 60]) {
     expect(inkTwoPixels.count - inkOff.count).toBeGreaterThan(150);
   });
 }
+
+// A 10 mm x 0.002 mm slot with semicircular ends drawn as a G36 region with
+// two G03 arcs (the exact path-region renderer), rotated about the board
+// centre: the minimum width must be judged across the slot's thickness, not
+// across the width and height of its axis-aligned bounding box.
+function rotatedSlotGerber(degrees) {
+  const lines = ["G04 rotated thin slot*", "%FSLAX46Y46*%", "%MOMM*%", "%ADD99C,0.1*%", "G75*", "G01*", "%LPD*%"];
+  const radians = (degrees * Math.PI) / 180;
+  const world = (u, v) => [20 + u * Math.cos(radians) - v * Math.sin(radians), 18 + u * Math.sin(radians) + v * Math.cos(radians)];
+  const t = 0.001;
+  const [p1, p2, p3, p4] = [world(-5, -t), world(5, -t), world(5, t), world(-5, t)];
+  const [a, b] = [world(-5, 0), world(5, 0)];
+  const arc = (to, from, centre) =>
+    `G03${point(to[0], to[1])}I${coordinate(centre[0] - from[0])}J${coordinate(centre[1] - from[1])}D01*`;
+  lines.push(
+    "G36*",
+    `${point(p1[0], p1[1])}D02*`,
+    `G01${point(p2[0], p2[1])}D01*`,
+    arc(p3, p2, b),
+    `G01${point(p4[0], p4[1])}D01*`,
+    arc(p1, p4, a),
+    "G37*",
+    "G01*",
+    "D99*",
+  );
+  [[0, 0, "D02"], [0, 36, "D01"], [40, 36, "D01"], [40, 0, "D01"], [0, 0, "D01"]].forEach(([x, y, op]) =>
+    lines.push(`${point(x, y)}${op}*`),
+  );
+  lines.push("M02*");
+  return `${lines.join("\n")}\n`;
+}
+
+for (const degrees of [30, 60]) {
+  test(`minimum width keeps a thin arc-ended slot rotated ${degrees} degrees visible`, async ({ page }) => {
+    await page.goto("/");
+    await page.locator("#file-input").setInputFiles({
+      name: "slot.gbr",
+      mimeType: "text/plain",
+      buffer: Buffer.from(rotatedSlotGerber(degrees)),
+    });
+    await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+    await expect(page.locator("#visible-layer-count")).toHaveText("1 / 1");
+
+    await setMinimumVisibility(page, 0);
+    const inkOff = await ink(page);
+    await setMinimumVisibility(page, 2);
+    const inkTwoPixels = await ink(page);
+
+    expect(inkTwoPixels.count - inkOff.count).toBeGreaterThan(150);
+  });
+}

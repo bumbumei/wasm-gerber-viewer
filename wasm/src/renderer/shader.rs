@@ -322,6 +322,7 @@ impl ShaderPrograms {
                 "viewport_size",
                 "minimum_feature_pixels",
                 "region_center",
+                "region_angle",
                 "region_half_size",
             ],
         )?;
@@ -337,6 +338,7 @@ impl ShaderPrograms {
                 "viewport_size",
                 "minimum_feature_pixels",
                 "region_center",
+                "region_angle",
                 "region_half_size",
             ],
         )?;
