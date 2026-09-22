@@ -4,23 +4,11 @@ in vec2 position;
 in float hole_x_instance;
 in float hole_y_instance;
 in float hole_radius_instance;
-// Oriented frame of the shape this vertex belongs to (centre, principal-axis
-// angle, half extents along that axis and its normal), so a sub-pixel region
-// (a pad drawn as a polygon) can be held at the minimum feature width like a
-// flashed pad, and a thin bar widens across its own thickness whatever its
-// rotation.
-in float region_center_x;
-in float region_center_y;
-in float region_angle;
-in float region_half_width;
-in float region_half_height;
 uniform mat3 transform;
 uniform vec2 viewport_size;
-uniform float minimum_feature_pixels;
 out highp vec2 vPosition;
 out highp vec2 vHoleCenter;
 out highp float vHoleRadius;
-out highp float vCoverage;
 // World units per pixel for the hole edge ramp (see circle.vert.glsl).
 out highp float vWorldPerPixel;
 
@@ -39,39 +27,11 @@ float weakestPixelsPerWorld() {
     return sqrt(weakestScaleSquared);
 }
 
-// Minimum visibility for a filled shape: how much each bounding-box axis has
-// to grow so the shape is at least sqrt(2)/2 px across (the smallest size that
-// always contains a pixel centre) or the chosen minimum, whichever is larger.
-// Each axis is scaled on its own, so a thin bar only widens and never grows
-// along its length. Returns 1.0 on an axis that is already large enough.
-vec2 minimumScale(vec2 halfSize, float pixelsPerWorld) {
-    if (minimum_feature_pixels <= 0.0) return vec2(1.0);
-    float minimumHalf = max(0.5 * minimum_feature_pixels, 0.70710678) / pixelsPerWorld;
-    return vec2(
-        halfSize.x > 0.000001 ? max(1.0, minimumHalf / halfSize.x) : 1.0,
-        halfSize.y > 0.000001 ? max(1.0, minimumHalf / halfSize.y) : 1.0);
-}
-
-
-// Rotate a vector by an angle (radians).
-vec2 rotateBy(vec2 v, float angle) {
-    float c = cos(angle);
-    float s = sin(angle);
-    return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
-}
-
 void main() {
-    float pixelsPerWorld = max(weakestPixelsPerWorld(), 0.000001);
-    vWorldPerPixel = 1.0 / pixelsPerWorld;
-    vec2 scale = minimumScale(vec2(region_half_width, region_half_height), pixelsPerWorld);
-    vec2 center = vec2(region_center_x, region_center_y);
-    vec2 local = rotateBy(position - center, -region_angle) * scale;
-    vec2 scaledPosition = center + rotateBy(local, region_angle);
-    vec3 transformed = transform * vec3(scaledPosition, 1.0);
+    vWorldPerPixel = 1.0 / max(weakestPixelsPerWorld(), 0.000001);
+    vec3 transformed = transform * vec3(position, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
     vPosition = position;
     vHoleCenter = vec2(hole_x_instance, hole_y_instance);
     vHoleRadius = hole_radius_instance;
-    // Coverage falls with the size ratio of the enlargement (see circle.vert.glsl).
-    vCoverage = 1.0 / sqrt(scale.x * scale.y);
 }

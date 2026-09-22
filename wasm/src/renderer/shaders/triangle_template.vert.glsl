@@ -12,7 +12,6 @@ uniform float minimum_feature_pixels;
 uniform vec2 template_center;
 uniform float template_angle;
 uniform vec2 template_half_size;
-out highp float vCoverage;
 
 // The smallest on-screen scale of the current transform, in pixels per world
 // unit (the shorter axis when the view is anisotropic).
@@ -61,5 +60,4 @@ void main() {
         + vec2(instance_x, instance_y);
     vec3 transformed = transform * vec3(worldPosition, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
-    vCoverage = 1.0 / sqrt(scale.x * scale.y);
 }

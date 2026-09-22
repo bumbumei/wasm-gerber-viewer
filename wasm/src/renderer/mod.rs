@@ -1358,7 +1358,7 @@ impl Renderer {
 
         // R8 allocation may have fallen back to RGBA8. Keep the sampling and
         // polarity mode coupled to the format that was actually created.
-        let actual_mask_in_red = mask_format_displays_in_red(fbo.color_format);
+        let actual_mask_in_red = fbo.color_format == "R8";
         let layer_metadata = LayerMetadata {
             gerber_data,
             fbo,
@@ -3065,7 +3065,7 @@ impl Renderer {
                 return Err(error);
             }
         };
-        let mask_in_red = mask_format_displays_in_red(fbo.color_format);
+        let mask_in_red = fbo.color_format == "R8";
 
         let layer_metadata = LayerMetadata {
             gerber_data,
@@ -3259,42 +3259,6 @@ impl Renderer {
 
         // Per-triangle bounding boxes for the minimum-visibility clamp,
         // computed once from the payload vertices.
-        let region = triangle_region_attributes(&vertices.to_vec());
-        buffer_cache.triangle_region_center_x_buffer = Some(Self::create_instance_buffer(
-            &self.gl,
-            &region.center_x,
-            &self.programs.triangle,
-            "region_center_x",
-            0,
-        )?);
-        buffer_cache.triangle_region_center_y_buffer = Some(Self::create_instance_buffer(
-            &self.gl,
-            &region.center_y,
-            &self.programs.triangle,
-            "region_center_y",
-            0,
-        )?);
-        buffer_cache.triangle_region_angle_buffer = Some(Self::create_instance_buffer(
-            &self.gl,
-            &region.angle,
-            &self.programs.triangle,
-            "region_angle",
-            0,
-        )?);
-        buffer_cache.triangle_region_half_width_buffer = Some(Self::create_instance_buffer(
-            &self.gl,
-            &region.half_width,
-            &self.programs.triangle,
-            "region_half_width",
-            0,
-        )?);
-        buffer_cache.triangle_region_half_height_buffer = Some(Self::create_instance_buffer(
-            &self.gl,
-            &region.half_height,
-            &self.programs.triangle,
-            "region_half_height",
-            0,
-        )?);
 
         self.gl.bind_vertex_array(None);
         Ok(())
@@ -3898,11 +3862,8 @@ impl Renderer {
                 ));
             }
             Self::validate_js_finite_array("path region cover vertices", &cover_vertices)?;
-            buffer_cache.path_region_frames = path_region_frames(
-                &wedge_vertices.to_vec(),
-                &Self::js_u32_array(&path_regions, "wedgeVertexOffsets")?.to_vec(),
-                &cover_vertices.to_vec(),
-            );
+            buffer_cache.path_region_frames =
+                path_region_frames_from_cover_quads(&cover_vertices.to_vec());
             let vao = self
                 .gl
                 .create_vertex_array()
@@ -4920,18 +4881,6 @@ impl Renderer {
         if let Some(buf) = cache.triangle_hole_radius_buffer {
             gl.delete_buffer(Some(&buf));
         }
-        for buf in [
-            cache.triangle_region_center_x_buffer,
-            cache.triangle_region_center_y_buffer,
-            cache.triangle_region_angle_buffer,
-            cache.triangle_region_half_width_buffer,
-            cache.triangle_region_half_height_buffer,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            gl.delete_buffer(Some(&buf));
-        }
         for template_cache in cache.triangle_template_caches {
             if let Some(vao) = template_cache.vao {
                 gl.delete_vertex_array(Some(&vao));
@@ -5182,42 +5131,21 @@ impl Renderer {
 
     /// General Gerber layers retain their historic linear RGBA fallback while
     /// preferring an R8 coverage attachment whenever the driver supports it.
-    /// Gerber layer masks carry two channels: red is the displayed coverage
-    /// (after the minimum-feature-width compensation) and green the geometry's
-    /// own edge coverage for composite membership. RG8 keeps that at two bytes
-    /// per pixel; the historic linear RGBA fallback (display in alpha,
-    /// presence in green) stands in where RG8 attachments are unsupported.
+    /// General Gerber layers retain their historic linear RGBA fallback while
+    /// preferring an R8 coverage attachment whenever the driver supports it.
     fn create_layer_mask_fbo(
         gl: &WebGl2RenderingContext,
         width: u32,
         height: u32,
         with_stencil: bool,
     ) -> Result<Fbo, JsValue> {
-        match Self::create_fbo_with_format(
+        Self::create_red_mask_fbo_with_fallback_filter(
             gl,
             width,
             height,
             with_stencil,
-            WebGl2RenderingContext::RG8 as i32,
-            WebGl2RenderingContext::RG,
-            WebGl2RenderingContext::NEAREST,
-        ) {
-            Ok(fbo) => Ok(fbo),
-            Err(FboBuildError::UnsupportedFormat(_)) => {
-                Self::drain_gl_errors(gl);
-                Self::create_fbo_with_format(
-                    gl,
-                    width,
-                    height,
-                    with_stencil,
-                    WebGl2RenderingContext::RGBA8 as i32,
-                    WebGl2RenderingContext::RGBA,
-                    WebGl2RenderingContext::LINEAR,
-                )
-                .map_err(FboBuildError::into_js_value)
-            }
-            Err(FboBuildError::Fatal(error)) => Err(error),
-        }
+            WebGl2RenderingContext::LINEAR,
+        )
     }
 
     fn create_red_mask_fbo_with_fallback_filter(
@@ -5293,18 +5221,7 @@ impl Renderer {
         // allocation, without snapshotting every texture unit for successful
         // layer creation, resize, or context recovery.
         let mut bindings = FboBuildBindingGuard::capture(gl).map_err(FboBuildError::Fatal)?;
-        // Single- and two-channel formats may be unsupported as attachments
-        // and fall back to RGBA8; the caller decides.
-        let is_r8 = internal_format == WebGl2RenderingContext::R8 as i32
-            || internal_format == WebGl2RenderingContext::RG8 as i32;
-        let (color_bytes_per_pixel, color_format): (usize, &'static str) =
-            if internal_format == WebGl2RenderingContext::R8 as i32 {
-                (1, "R8")
-            } else if internal_format == WebGl2RenderingContext::RG8 as i32 {
-                (2, "RG8")
-            } else {
-                (4, "RGBA8")
-            };
+        let is_r8 = internal_format == WebGl2RenderingContext::R8 as i32;
         let fatal = FboBuildError::Fatal;
         if width == 0 || height == 0 {
             return Err(fatal(JsValue::from_str(
@@ -5432,7 +5349,10 @@ impl Renderer {
         gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
         gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
 
-        let fbo = pending.commit(color_bytes_per_pixel, color_format);
+        let fbo = pending.commit(
+            if is_r8 { 1 } else { 4 },
+            if is_r8 { "R8" } else { "RGBA8" },
+        );
         // Preserve the historical successful-build state cleanup above; the
         // binding snapshot is solely failure rollback.
         bindings.disarm();
@@ -5812,18 +5732,6 @@ impl Renderer {
                 .and_then(|composite| composite.output_fbo.as_ref())
                 .map(|fbo| fbo.texture.clone())
                 .ok_or_else(|| JsValue::from_str("Composite mask texture is unavailable")),
-        }
-    }
-
-    /// Whether a membership source keeps the geometry's presence in green
-    /// (Gerber layer masks); composite outputs and internal outline masks are
-    /// binary and read through their display channel.
-    fn mask_source_presence_in_green(&self, source: ResolvedMaskSource) -> Result<bool, JsValue> {
-        match source.kind() {
-            MaskSourceKind::Gerber => Ok(mask_format_keeps_presence_in_green(
-                self.get_layer(source.layer_id())?.fbo.color_format,
-            )),
-            MaskSourceKind::InternalOutline | MaskSourceKind::Composite => Ok(false),
         }
     }
 
@@ -6628,26 +6536,6 @@ impl Renderer {
                     pending_cache.cache.triangle_hole_radius_buffer = Some(hole_radius_buffer);
                 }
 
-                // Per-triangle bounding boxes for the minimum-visibility clamp.
-                let region = triangle_region_attributes(&triangles.vertices);
-                for (data, name, slot) in [
-                    (&region.center_x, "region_center_x", 0usize),
-                    (&region.center_y, "region_center_y", 1),
-                    (&region.angle, "region_angle", 2),
-                    (&region.half_width, "region_half_width", 3),
-                    (&region.half_height, "region_half_height", 4),
-                ] {
-                    let buffer = Self::create_instance_buffer(&self.gl, data, program, name, 0)?;
-                    let cache = &mut pending_cache.cache;
-                    *match slot {
-                        0 => &mut cache.triangle_region_center_x_buffer,
-                        1 => &mut cache.triangle_region_center_y_buffer,
-                        2 => &mut cache.triangle_region_angle_buffer,
-                        3 => &mut cache.triangle_region_half_width_buffer,
-                        _ => &mut cache.triangle_region_half_height_buffer,
-                    } = Some(buffer);
-                }
-
                 // Unbind VAO
                 self.gl.bind_vertex_array(None);
                 let mut built_cache = pending_cache.commit();
@@ -6661,16 +6549,6 @@ impl Renderer {
                 buffer_cache.triangle_hole_y_buffer = built_cache.triangle_hole_y_buffer.take();
                 buffer_cache.triangle_hole_radius_buffer =
                     built_cache.triangle_hole_radius_buffer.take();
-                buffer_cache.triangle_region_center_x_buffer =
-                    built_cache.triangle_region_center_x_buffer.take();
-                buffer_cache.triangle_region_center_y_buffer =
-                    built_cache.triangle_region_center_y_buffer.take();
-                buffer_cache.triangle_region_angle_buffer =
-                    built_cache.triangle_region_angle_buffer.take();
-                buffer_cache.triangle_region_half_width_buffer =
-                    built_cache.triangle_region_half_width_buffer.take();
-                buffer_cache.triangle_region_half_height_buffer =
-                    built_cache.triangle_region_half_height_buffer.take();
                 layer.gerber_data[sublayer_idx]
                     .triangles
                     .release_cpu_geometry();
@@ -7665,11 +7543,8 @@ impl Renderer {
             buffer_cache.path_sector_vertex_buffer = Some(buffer);
         }
 
-        buffer_cache.path_region_frames = path_region_frames(
-            &path_regions.wedge_vertices,
-            &path_regions.wedge_vertex_offsets,
-            &path_regions.cover_vertices,
-        );
+        buffer_cache.path_region_frames =
+            path_region_frames_from_cover_quads(&path_regions.cover_vertices);
         if !path_regions.cover_vertices.is_empty() {
             buffer_cache.path_cover_vertex_count = Self::checked_usize_to_i32(
                 "path region cover vertex count",
@@ -7796,9 +7671,6 @@ impl Renderer {
             self.gl
                 .uniform2f(Some(loc), frame.center[0], frame.center[1]);
         }
-        if let Some(loc) = program.uniforms.get("region_angle") {
-            self.gl.uniform1f(Some(loc), frame.angle);
-        }
         if let Some(loc) = program.uniforms.get("region_half_size") {
             self.gl
                 .uniform2f(Some(loc), frame.half_size[0], frame.half_size[1]);
@@ -7885,39 +7757,28 @@ impl Renderer {
 
             // Set polarity blending mode. Positive coverage combines as a
             // union (MAX): a pixel is as covered as the most covering piece on
-            // it. Full-size geometry tiles its pixels, so the result is the
-            // same as adding, but the pieces of one pad held at the minimum
-            // feature width (or neighbouring enlarged pads) overlap inside a
-            // pixel and must not add up past their own coverage. Negative
-            // polarity keeps the additive erase.
+            // it, so overlapping anti-aliased edges and pads held at the
+            // minimum feature width never add up past full coverage.
+            // Negative polarity keeps the additive erase.
             self.gl.enable(BLEND);
             if mask_in_red && is_negative {
-                // Red masks accumulate polarity in their colour channels: the
-                // displayed coverage in red and, for RG8, the presence in
-                // green. Clear geometry erases each channel by its own value.
-                self.gl
-                    .blend_func(ZERO, WebGl2RenderingContext::ONE_MINUS_SRC_COLOR);
+                // R8 masks accumulate polarity in red rather than alpha.
+                // Clear coverage erases destination red.
+                self.gl.blend_func(ZERO, ONE_MINUS_SRC_ALPHA);
                 self.gl.blend_equation(FUNC_ADD);
             } else if mask_in_red {
                 self.gl.blend_func(ONE, ONE);
                 self.gl.blend_equation(WebGl2RenderingContext::MAX);
             } else if is_negative {
-                // RGBA fallback, negative polarity: erase the displayed
-                // coverage (red, alpha) and the presence (green) each by the
-                // shape's own value.
-                self.gl.blend_func_separate(
-                    ZERO,
-                    WebGl2RenderingContext::ONE_MINUS_SRC_COLOR,
-                    ZERO,
-                    ONE_MINUS_SRC_ALPHA,
-                );
+                // Negative polarity: erase alpha
+                self.gl
+                    .blend_func_separate(ZERO, ONE, ZERO, ONE_MINUS_SRC_ALPHA);
                 self.gl.blend_equation(FUNC_ADD);
             } else {
-                // RGBA fallback, positive polarity: every channel is the union
-                // of what the shapes wrote (displayed coverage in red/alpha,
-                // presence in green).
-                self.gl.blend_func_separate(ONE, ONE, ONE, ONE);
-                self.gl.blend_equation(WebGl2RenderingContext::MAX);
+                // Positive polarity: colour untouched, alpha is the coverage
+                self.gl.blend_func_separate(ZERO, ONE, ONE, ONE);
+                self.gl
+                    .blend_equation_separate(FUNC_ADD, WebGl2RenderingContext::MAX);
             }
 
             // Render all shapes (empty checks done inside draw methods)
@@ -9397,7 +9258,6 @@ impl Renderer {
     fn msaa_internal_format(color_format: &str) -> Option<u32> {
         match color_format {
             "R8" => Some(WebGl2RenderingContext::R8),
-            "RG8" => Some(WebGl2RenderingContext::RG8),
             "RGBA8" => Some(WebGl2RenderingContext::RGBA8),
             _ => None,
         }
@@ -9761,11 +9621,9 @@ impl Renderer {
         let mut source_textures: [Option<WebGlTexture>; MAX_COMPOSITE_SOURCES] =
             std::array::from_fn(|_| None);
         let mut source_is_red = [false; MAX_COMPOSITE_SOURCES];
-        let mut source_presence_in_green = [false; MAX_COMPOSITE_SOURCES];
         for (index, source) in sources[..source_count].iter().copied().enumerate() {
             source_textures[index] = Some(self.mask_source_texture(source)?);
             source_is_red[index] = self.mask_source_is_red(source)?;
-            source_presence_in_green[index] = self.mask_source_presence_in_green(source)?;
         }
         let scratch = self
             .membership_scratch
@@ -9806,13 +9664,9 @@ impl Renderer {
             {
                 let batch_start = batch_index * batch_size;
                 let mut red_source_mask = 0i32;
-                let mut green_source_mask = 0i32;
                 for local_slot in 0..batch.len() {
                     if source_is_red[batch_start + local_slot] {
                         red_source_mask |= 1 << local_slot;
-                    }
-                    if source_presence_in_green[batch_start + local_slot] {
-                        green_source_mask |= 1 << local_slot;
                     }
                 }
                 for local_slot in 0..8usize {
@@ -9840,10 +9694,6 @@ impl Renderer {
                     .uniform1i(program.uniforms.get("u_base_slot"), batch_start as i32);
                 self.gl
                     .uniform1i(program.uniforms.get("u_red_source_mask"), red_source_mask);
-                self.gl.uniform1i(
-                    program.uniforms.get("u_green_source_mask"),
-                    green_source_mask,
-                );
                 self.gl.draw_arrays(TRIANGLES, 0, 6);
                 completed_passes += 1;
             }
@@ -10199,7 +10049,7 @@ impl Renderer {
         }
         for (layer, replacement) in self.layers.iter_mut().zip(replacements) {
             if let (Some(layer), Some(replacement)) = (layer, replacement) {
-                layer.mask_in_red = mask_format_displays_in_red(replacement.color_format);
+                layer.mask_in_red = replacement.color_format == "R8";
                 let old_fbo = std::mem::replace(&mut layer.fbo, replacement);
                 Self::delete_fbo(&self.gl, old_fbo);
                 layer.fbo_dirty = true;
@@ -10316,7 +10166,7 @@ impl Renderer {
             self.layers.iter_mut().zip(new_fbos).zip(new_buffer_caches)
         {
             if let (Some(layer), Some(new_fbo), Some(new_caches)) = (layer, new_fbo, new_caches) {
-                layer.mask_in_red = mask_format_displays_in_red(new_fbo.color_format);
+                layer.mask_in_red = new_fbo.color_format == "R8";
                 let old_fbo = std::mem::replace(&mut layer.fbo, new_fbo);
                 Self::delete_fbo(&old_gl, old_fbo);
 
@@ -10376,20 +10226,6 @@ impl Drop for Renderer {
         self.gl.delete_buffer(Some(&self.quad_buffer));
         Self::delete_shader_programs(&self.gl, &self.programs);
     }
-}
-
-/// Masks whose display coverage lives in red: R8 (internal outline masks,
-/// composite outputs) and RG8 (Gerber layer masks). RGBA fallbacks display
-/// through alpha.
-fn mask_format_displays_in_red(color_format: &str) -> bool {
-    matches!(color_format, "R8" | "RG8")
-}
-
-/// Masks that keep the geometry's own edge coverage in green next to the
-/// displayed coverage, for composite membership: RG8 layer masks and the
-/// RGBA layer fallback. R8 masks have one channel and are binary anyway.
-fn mask_format_keeps_presence_in_green(color_format: &str) -> bool {
-    matches!(color_format, "RG8" | "RGBA8")
 }
 
 /// Oriented frame of a point set: the mean is the pivot, the principal axis of
@@ -10471,134 +10307,17 @@ fn oriented_frame_of_vertices(vertices: &[f32]) -> ShapeFrame {
     oriented_frame(&points)
 }
 
-/// One oriented frame per path region. The wedge triangles of a region are
-/// `(reference, start, end)` fans, so every vertex but the first of each
-/// triangle lies on the contour; regions without wedges (a lone full circle)
-/// fall back to their axis-aligned cover quad.
-fn path_region_frames(
-    wedge_vertices: &[f32],
-    wedge_vertex_offsets: &[u32],
-    cover_vertices: &[f32],
-) -> Vec<ShapeFrame> {
-    let region_count = wedge_vertex_offsets.len().saturating_sub(1);
-    let mut frames = Vec::with_capacity(region_count);
-    for region_idx in 0..region_count {
-        let start = wedge_vertex_offsets[region_idx] as usize;
-        let end = (wedge_vertex_offsets[region_idx + 1] as usize).min(wedge_vertices.len() / 2);
-        let mut points: Vec<[f32; 2]> = Vec::new();
-        let mut vertex = start;
-        while vertex + 3 <= end {
-            for corner in 1..3 {
-                let index = (vertex + corner) * 2;
-                points.push([wedge_vertices[index], wedge_vertices[index + 1]]);
-            }
-            vertex += 3;
-        }
-        let frame = if points.len() >= 2 {
-            oriented_frame(&points)
-        } else {
-            let quad = &cover_vertices[region_idx * 12..];
-            if quad.len() >= 12 {
-                oriented_frame(&[
-                    [quad[0], quad[1]],
-                    [quad[2], quad[3]],
-                    [quad[4], quad[5]],
-                    [quad[10], quad[11]],
-                ])
-            } else {
-                ShapeFrame::default()
-            }
-        };
-        frames.push(frame);
-    }
-    frames
-}
-
-/// Per-vertex oriented-frame attributes of the *shape* each triangle belongs
-/// to, for the minimum-visibility clamp of filled regions.
-///
-/// Triangles that share a vertex (bit-exact) belong to one shape: the fan of
-/// a tessellated round pad shares its centre, the halves of a rectangle share
-/// an edge, a triangulated region shares its contour points. Membership is a
-/// union over the whole array, so the order the triangulator emitted the
-/// triangles in does not matter. Two separate shapes are only merged when
-/// they touch at an identical coordinate, in which case they are enlarged
-/// together.
-struct TriangleRegionAttributes {
-    center_x: Vec<f32>,
-    center_y: Vec<f32>,
-    angle: Vec<f32>,
-    half_width: Vec<f32>,
-    half_height: Vec<f32>,
-}
-
-fn triangle_region_attributes(vertices: &[f32]) -> TriangleRegionAttributes {
-    let triangle_count = vertices.len() / 6;
-    let mut region = TriangleRegionAttributes {
-        center_x: Vec::with_capacity(triangle_count * 3),
-        center_y: Vec::with_capacity(triangle_count * 3),
-        angle: Vec::with_capacity(triangle_count * 3),
-        half_width: Vec::with_capacity(triangle_count * 3),
-        half_height: Vec::with_capacity(triangle_count * 3),
-    };
-    // Union-find over triangles keyed by shared vertices.
-    let mut parent: Vec<usize> = (0..triangle_count).collect();
-    fn find(parent: &mut [usize], mut i: usize) -> usize {
-        while parent[i] != i {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
-        }
-        i
-    }
-    let mut owner: HashMap<(u32, u32), usize> = HashMap::new();
-    for triangle in 0..triangle_count {
-        for corner in 0..3 {
-            let x = vertices[triangle * 6 + corner * 2];
-            let y = vertices[triangle * 6 + corner * 2 + 1];
-            if !x.is_finite() || !y.is_finite() {
-                continue;
-            }
-            match owner.entry((x.to_bits(), y.to_bits())) {
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(triangle);
-                }
-                std::collections::hash_map::Entry::Occupied(slot) => {
-                    let a = find(&mut parent, *slot.get());
-                    let b = find(&mut parent, triangle);
-                    if a != b {
-                        parent[b] = a;
-                    }
-                }
-            }
-        }
-    }
-    let mut members: HashMap<usize, Vec<[f32; 2]>> = HashMap::new();
-    for triangle in 0..triangle_count {
-        let root = find(&mut parent, triangle);
-        let points = members.entry(root).or_default();
-        for corner in 0..3 {
-            points.push([
-                vertices[triangle * 6 + corner * 2],
-                vertices[triangle * 6 + corner * 2 + 1],
-            ]);
-        }
-    }
-    let frames: HashMap<usize, ShapeFrame> = members
-        .iter()
-        .map(|(root, points)| (*root, oriented_frame(points)))
-        .collect();
-    for triangle in 0..triangle_count {
-        let root = find(&mut parent, triangle);
-        let frame = frames.get(&root).copied().unwrap_or_default();
-        for _ in 0..3 {
-            region.center_x.push(frame.center[0]);
-            region.center_y.push(frame.center[1]);
-            region.angle.push(frame.angle);
-            region.half_width.push(frame.half_size[0]);
-            region.half_height.push(frame.half_size[1]);
-        }
-    }
-    region
+/// One axis-aligned frame per path region from its cover quad, whose six
+/// vertices start `min,min / max,min / min,max`.
+fn path_region_frames_from_cover_quads(cover_vertices: &[f32]) -> Vec<ShapeFrame> {
+    cover_vertices
+        .chunks_exact(12)
+        .map(|quad| ShapeFrame {
+            center: [(quad[0] + quad[2]) * 0.5, (quad[1] + quad[5]) * 0.5],
+            angle: 0.0,
+            half_size: [(quad[2] - quad[0]) * 0.5, (quad[5] - quad[1]) * 0.5],
+        })
+        .collect()
 }
 
 #[cfg(test)]

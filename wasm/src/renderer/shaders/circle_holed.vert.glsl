@@ -14,7 +14,6 @@ uniform float anti_aliasing;
 out highp vec2 vPosition;
 out highp vec2 vHoleCenter;
 out highp float vHoleRadius;
-out highp float vCoverage;
 out highp float vEdgeWidth;
 
 // The smallest on-screen scale of the current transform, in pixels per world
@@ -42,9 +41,6 @@ void main() {
         : 0.0;
     float trueRadius = max(radius_instance, 0.0);
     float effectiveRadius = max(trueRadius, minimumRadius);
-    // Coverage scaled by the size ratio when the pad is held at the minimum
-    // (see circle.vert.glsl).
-    vCoverage = trueRadius > 0.0 ? trueRadius / effectiveRadius : 1.0;
     // Anti-aliasing fringe (see circle.vert.glsl): the quad grows by half a
     // pixel while vPosition keeps the true radius at 1.0.
     float safeRadius = max(effectiveRadius, 0.000000001);

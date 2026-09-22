@@ -2,7 +2,6 @@
 precision highp float;
 in highp vec2 vPosition;
 in highp float vInnerRadius;
-in highp float vCoverage;
 in highp float vEdgeWidth;
 uniform lowp vec4 color;
 uniform float anti_aliasing;
@@ -25,10 +24,5 @@ void main() {
         alpha = dist <= 1.0 && dist >= vInnerRadius ? 1.0 : 0.0;
     }
     if (alpha <= 0.0) discard;
-    // Red (and alpha) carry the displayed coverage after the minimum-width
-    // compensation; green carries the shape's own edge coverage, which
-    // composite membership tests against 0.5, so a pad held at the minimum
-    // stays a composite member although it is drawn dim.
-    float displayed = vCoverage * alpha;
-    fragColor = vec4(color.r * displayed, color.g * alpha, color.b * alpha, color.a * displayed);
+    fragColor = color * alpha;
 }

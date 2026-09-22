@@ -3,7 +3,6 @@ precision highp float;
 in highp vec2 vPosition;
 in highp vec2 vHoleCenter;
 in highp float vHoleRadius;
-in highp float vCoverage;
 in highp float vWorldPerPixel;
 uniform lowp vec4 color;
 uniform float anti_aliasing;
@@ -21,7 +20,5 @@ void main() {
         }
         if (alpha <= 0.0) discard;
     }
-    // Red: edge coverage for composite membership; alpha: displayed coverage.
-    float displayed = vCoverage * alpha;
-    fragColor = vec4(color.r * displayed, color.g * alpha, color.b * alpha, color.a * displayed);
+    fragColor = color * alpha;
 }

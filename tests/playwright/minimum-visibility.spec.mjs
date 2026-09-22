@@ -2,17 +2,17 @@ import { expect, test } from "@playwright/test";
 import { fileURLToPath } from "node:url";
 
 // Dense arrays of small pads, as a fine-pitch BGA produces, one array per
-// geometry path so a clamp that silently stops working on one path fails its
-// own case: 40 x 40 round pads of 0.25 mm at 0.5 mm pitch (circles), the same
-// array flashed with a macro aperture (triangle templates), 30 x 30 squares
-// of 0.25 mm drawn as G36 regions (triangles), and 20 x 20 rounded squares
-// drawn as G36 regions with arc corners (the exact path-region renderer,
-// which is how CAM tools such as CircuitCAM write stencil pads). Every file
-// carries the same 40 x 36 mm outline so the board fits the view identically.
+// geometry path that honours the minimum feature width, so a clamp that
+// silently stops working on one path fails its own case: 40 x 40 round pads
+// of 0.25 mm at 0.5 mm pitch (circles), the same array flashed with a macro
+// aperture (triangle templates), and 20 x 20 rounded squares drawn as G36
+// regions with arc corners (the exact path-region renderer, which is how CAM
+// tools such as CircuitCAM write stencil pads). Plain triangulated regions
+// are outside the option's scope. Every file carries the same 40 x 36 mm
+// outline so the board fits the view identically.
 const PAD_ARRAYS = {
   "round flashes": (lines) => flashArray(lines, "D10", 40),
   "macro flashes": (lines) => flashArray(lines, "D11", 40),
-  "square regions": (lines) => regionArray(lines, 30, squareRegion),
   "rounded regions": (lines) => regionArray(lines, 20, roundedRegion),
 };
 
@@ -39,19 +39,6 @@ function flashArray(lines, code, count) {
 function regionArray(lines, count, emit) {
   for (const [x, y] of gridCentres(count, 0.5)) emit(lines, x, y);
   lines.push("G01*");
-}
-
-function squareRegion(lines, cx, cy) {
-  const corner = (dx, dy, op) => `${point(cx + dx, cy + dy)}${op}*`;
-  lines.push(
-    "G36*",
-    corner(-0.125, -0.125, "D02"),
-    corner(0.125, -0.125, "D01"),
-    corner(0.125, 0.125, "D01"),
-    corner(-0.125, 0.125, "D01"),
-    corner(-0.125, -0.125, "D01"),
-    "G37*",
-  );
 }
 
 function roundedRegion(lines, cx, cy) {
@@ -221,7 +208,7 @@ test("pads held at the minimum width stay members of a composite", async ({ page
   await page.goto("/");
   await page.locator("#file-input").setInputFiles([
     { name: "pads.gtl", mimeType: "text/plain", buffer: Buffer.from(denseBgaGerber("round flashes")) },
-    { name: "squares.gtl", mimeType: "text/plain", buffer: Buffer.from(denseBgaGerber("square regions")) },
+    { name: "macros.gtl", mimeType: "text/plain", buffer: Buffer.from(denseBgaGerber("macro flashes")) },
   ]);
   await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
   await expect(page.locator(".gerber-layer-item")).toHaveCount(2);
@@ -243,7 +230,7 @@ test("pads held at the minimum width stay members of a composite", async ({ page
   await page.locator(".layer-create-composite button").click();
   const dialog = page.locator(".composite-layer-dialog");
   await dialog.locator("[data-composite-name]").fill("Pads union");
-  for (const name of ["pads.gtl", "squares.gtl"]) {
+  for (const name of ["pads.gtl", "macros.gtl"]) {
     await dialog.locator(".composite-source-choice", { hasText: name }).locator("input").check();
   }
   await dialog.locator('[data-composite-preset="union"]').click();
@@ -265,28 +252,26 @@ test("pads held at the minimum width stay members of a composite", async ({ page
   expect(compositeInk.count).toBeGreaterThan(sourceInk.count * 0.8);
 });
 
-// A 10 mm x 0.002 mm bar drawn as a G36 region, rotated about the board
-// centre: far thinner than a pixel at any zoom, so only the minimum width
-// can make it visible, and only if that width is judged across the bar's
-// own thickness rather than the width and height of its bounding box.
+// A 10 mm x 0.002 mm bar flashed as a macro aperture (primitive 21, centre
+// line with rotation) at the board centre: far thinner than a pixel at any
+// zoom, so only the minimum width can make it visible, and only if that width
+// is judged across the bar's own thickness rather than the width and height
+// of its axis-aligned bounding box.
 function rotatedBarGerber(degrees) {
-  const lines = ["G04 rotated thin bar*", "%FSLAX46Y46*%", "%MOMM*%", "%ADD99C,0.1*%", "G75*", "G01*", "%LPD*%"];
-  const radians = (degrees * Math.PI) / 180;
-  const corner = (u, v) => {
-    const x = 20 + u * Math.cos(radians) - v * Math.sin(radians);
-    const y = 18 + u * Math.sin(radians) + v * Math.cos(radians);
-    return point(x, y);
-  };
-  lines.push(
-    "G36*",
-    `${corner(-5, -0.001)}D02*`,
-    `${corner(5, -0.001)}D01*`,
-    `${corner(5, 0.001)}D01*`,
-    `${corner(-5, 0.001)}D01*`,
-    `${corner(-5, -0.001)}D01*`,
-    "G37*",
+  const lines = [
+    "G04 rotated thin bar*",
+    "%FSLAX46Y46*%",
+    "%MOMM*%",
+    `%AMBAR*21,1,10,0.002,0,0,${degrees}*%`,
+    "%ADD10BAR*%",
+    "%ADD99C,0.1*%",
+    "G75*",
+    "G01*",
+    "%LPD*%",
+    "D10*",
+    `${point(20, 18)}D03*`,
     "D99*",
-  );
+  ];
   [[0, 0, "D02"], [0, 36, "D01"], [40, 36, "D01"], [40, 0, "D01"], [0, 0, "D01"]].forEach(([x, y, op]) =>
     lines.push(`${point(x, y)}${op}*`),
   );

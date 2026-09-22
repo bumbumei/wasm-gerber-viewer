@@ -169,19 +169,8 @@ impl ShaderPrograms {
                 "hole_x_instance",
                 "hole_y_instance",
                 "hole_radius_instance",
-                "region_center_x",
-                "region_center_y",
-                "region_angle",
-                "region_half_width",
-                "region_half_height",
             ],
-            &[
-                "transform",
-                "color",
-                "viewport_size",
-                "minimum_feature_pixels",
-                "anti_aliasing",
-            ],
+            &["transform", "color", "viewport_size", "anti_aliasing"],
         )?;
         pending.track(&triangle);
 
@@ -333,7 +322,6 @@ impl ShaderPrograms {
                 "viewport_size",
                 "minimum_feature_pixels",
                 "region_center",
-                "region_angle",
                 "region_half_size",
             ],
         )?;
@@ -349,7 +337,6 @@ impl ShaderPrograms {
                 "viewport_size",
                 "minimum_feature_pixels",
                 "region_center",
-                "region_angle",
                 "region_half_size",
             ],
         )?;
@@ -372,7 +359,6 @@ impl ShaderPrograms {
                 "u_source_count",
                 "u_base_slot",
                 "u_red_source_mask",
-                "u_green_source_mask",
             ],
         )?;
         pending.track(&composite_membership);

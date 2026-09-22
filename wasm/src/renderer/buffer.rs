@@ -46,11 +46,6 @@ pub struct BufferCache {
     pub triangle_hole_y_buffer: Option<WebGlBuffer>,
     pub triangle_hole_radius_buffer: Option<WebGlBuffer>,
     // Per-vertex bounding box of each triangle (minimum-visibility clamp)
-    pub triangle_region_center_x_buffer: Option<WebGlBuffer>,
-    pub triangle_region_center_y_buffer: Option<WebGlBuffer>,
-    pub triangle_region_angle_buffer: Option<WebGlBuffer>,
-    pub triangle_region_half_width_buffer: Option<WebGlBuffer>,
-    pub triangle_region_half_height_buffer: Option<WebGlBuffer>,
     pub triangle_template_caches: Vec<TriangleTemplateBufferCache>,
 
     // Lines cache
@@ -105,8 +100,8 @@ pub struct BufferCache {
     pub path_clear_vao: Option<WebGlVertexArrayObject>,
     pub path_clear_vertex_count: i32,
     pub path_clear_vertex_buffer: Option<WebGlBuffer>,
-    /// Oriented frame per path region, kept after the CPU geometry is
-    /// released so the minimum feature width can scale each region about its
-    /// own centre along its own axes.
+    /// Bounding-box frame per path region (from its cover quad), kept after
+    /// the CPU geometry is released so the minimum feature width can scale
+    /// each region about its own centre.
     pub path_region_frames: Vec<ShapeFrame>,
 }
