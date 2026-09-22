@@ -10322,10 +10322,11 @@ fn oriented_frame_of_vertices(vertices: &[f32]) -> ShapeFrame {
 
 /// One oriented frame per path region from the region's own contour points,
 /// so a thin slot is measured across its thickness whatever its rotation. The
-/// wedge triangles of a region are `(reference, start, end)` fans, so every
-/// vertex but the first of each triangle lies on the contour; a region
-/// without straight segments (a lone full circle) falls back to its cover
-/// quad. Computed once when the GPU cache is built, 20 bytes per region.
+/// wedge triangles of a region are `(reference, start, end)` fans over its
+/// line segments and arc chunks, so every vertex but the first of each
+/// triangle lies on the contour; a region that produced no wedge triangles
+/// falls back to its cover quad. Computed once when the GPU cache is built,
+/// 20 bytes per region.
 fn path_region_frames(
     wedge_vertices: &[f32],
     wedge_vertex_offsets: &[u32],
