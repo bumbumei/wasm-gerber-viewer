@@ -513,7 +513,7 @@ impl GerberProcessor {
     }
 
     /// Turn anti-aliased layer masks on or off (default off). Independent of
-    /// the minimum feature width; applies to the viewer, screenshots and the
+    /// the minimum line width; applies to the viewer, screenshots and the
     /// renderer API alike because they all go through this processor.
     pub fn set_anti_aliasing(&mut self, enabled: bool) {
         self.anti_aliasing = enabled;

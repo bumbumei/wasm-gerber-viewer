@@ -6,7 +6,6 @@ in float center_y_instance;
 in float radius_instance;
 uniform mat3 transform;
 uniform vec2 viewport_size;
-uniform float minimum_feature_pixels;
 uniform float anti_aliasing;
 uniform float inner_outline_pixels;
 uniform float inner_outline_world;
@@ -35,16 +34,7 @@ float weakestPixelsPerWorld() {
 void main() {
     vec2 center = vec2(center_x_instance, center_y_instance);
     float pixelsPerWorld = max(weakestPixelsPerWorld(), 0.000001);
-    // Minimum visibility: a pad is never drawn narrower than the chosen
-    // number of pixels, so dense arrays stay visible when zoomed out. The
-    // rasteriser samples pixel centres, and a disc only always contains one
-    // when its radius is at least sqrt(2)/2 px, so that is the floor once the
-    // option is on (a 1 px disc would still miss about a fifth of the pads).
-    float minimumRadius = minimum_feature_pixels > 0.0
-        ? max(0.5 * minimum_feature_pixels, 0.70710678) / pixelsPerWorld
-        : 0.0;
-    float trueRadius = max(radius_instance, 0.0);
-    float baseRadius = max(trueRadius, minimumRadius);
+    float baseRadius = max(radius_instance, 0.0);
     float outlineWorldRadius = inner_outline_world + inner_outline_pixels / pixelsPerWorld;
     float effectiveRadius = baseRadius + outlineWorldRadius;
     // Anti-aliasing: the quad grows by half a pixel so the fragment shader's

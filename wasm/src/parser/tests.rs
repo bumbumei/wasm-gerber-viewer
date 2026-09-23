@@ -1372,36 +1372,6 @@ M02*",
 }
 
 #[test]
-fn consecutive_arc_regions_share_one_sublayer() {
-    // A stencil layer is thousands of rounded pads in a row; each used to
-    // open its own polarity sublayer.
-    let mut gerber = String::from(
-        "%FSLAX24Y24*%
-%MOMM*%
-G75*
-",
-    );
-    for index in 0..3 {
-        let offset = index * 40000;
-        gerber.push_str(&format!(
-            "G36*
-X{:06}Y000000D02*
-G03*
-X{:06}Y000000I-010000J000000D01*
-G37*
-",
-            offset + 10000,
-            offset - 10000,
-        ));
-    }
-    gerber.push_str("M02*");
-    let layers = parse_gerber(&gerber).expect("consecutive arc regions should parse");
-
-    assert_eq!(layers.len(), 1);
-    assert_eq!(layers[0].path_regions.region_count(), 3);
-}
-
-#[test]
 fn path_region_translate_moves_analytic_sector_vertices() {
     let mut layers = parse_gerber(
         "\

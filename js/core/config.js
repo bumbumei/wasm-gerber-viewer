@@ -42,7 +42,6 @@ export const GERBER_FILE_EXTENSIONS = new Set([
   ".gbr",
   ".gbs",
   ".gbp",
-  ".gbx",
   ".gdo",
   ".ger",
   ".gko",

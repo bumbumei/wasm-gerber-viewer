@@ -442,7 +442,7 @@ other valid layers/composites continue.
 - `view`: manual `{ zoomX, zoomY, offsetX, offsetY }`; takes precedence over `fit`.
 - `preserveArcRegions`: keeps exact region arcs. Defaults to `true`; set `false` to approximate region arcs.
 - `arcTessellationQuality`: arc approximation quality, `0` low, `1` normal, `2` high. Defaults to `1`.
-- `minimumFeaturePixels`: minimum rendered feature width (lines, arcs and pads) in screen pixels. Defaults to `1`.
+- `minimumFeaturePixels`: minimum rendered line/arc width in screen pixels. Defaults to `1`.
 - `antiAliasing`: anti-aliased layer masks (4x MSAA plus analytic edge coverage). Costs one canvas-sized multisample target and a resolve per layer. Defaults to `false`.
 - `renderDrills`: renders NC drill files (`.drl`, `.nc`, `.xnc`, `.xln`) as drill overlays. Defaults to `true`.
 - `globalAlpha`: opacity for Gerber layers without an explicit layer `alpha` in `blend` mode. Defaults to `0.7`; drill layers render at full opacity unless their own `alpha` is set.
@@ -543,7 +543,7 @@ CLI options:
 - `--background <color>`: hex or `rgb()`/`rgba()` background. Omit for transparent output.
 - `--alpha <0-1>`: Gerber layer opacity in `blend` mode. Defaults to `0.7`; `stack` mode uses full Gerber opacity, and drill overlays render at full opacity.
 - `--composite-mode <blend|stack>`: layer compositing mode. Defaults to `blend`.
-- `--minimum-feature-pixels <px>`: minimum rendered feature width. Defaults to `1`.
+- `--minimum-feature-pixels <px>`: minimum rendered line/arc width. Defaults to `1`.
 - `--anti-aliasing`: anti-aliased layer masks (4x MSAA plus analytic edge coverage). Off by default.
 - `--max-render-target-bytes <size>`: per-render target memory cap. Accepts bytes or suffixes like `512m` and `2g`.
 - `--max-band-bytes <size>`: streamed PNG row-buffer cap. Accepts bytes or suffixes like `512m` and `2g`.

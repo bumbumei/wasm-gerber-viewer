@@ -4,7 +4,7 @@ mod composite;
 mod shader;
 
 // Internal use only
-use buffer::{BufferCache, Fbo, ShapeFrame, TriangleTemplateBufferCache};
+use buffer::{BufferCache, Fbo, TriangleTemplateBufferCache};
 use camera::Camera;
 use composite::{
     get_bit as composite_get_bit, normalize_fallback_bounds, preset_bitset,
@@ -3261,9 +3261,6 @@ impl Renderer {
                 )?);
         }
 
-        // Per-triangle bounding boxes for the minimum-visibility clamp,
-        // computed once from the payload vertices.
-
         self.gl.bind_vertex_array(None);
         Ok(())
     }
@@ -3309,7 +3306,6 @@ impl Renderer {
             template_cache.vao = Some(vao);
             template_cache.vertex_count = vertex_count;
             template_cache.instance_count = instance_count;
-            template_cache.frame = oriented_frame_of_vertices(&vertices.to_vec());
             let vertex_buffer = Self::create_attrib_buffer_from_js_array(
                 &self.gl,
                 &vertices,
@@ -3866,11 +3862,6 @@ impl Renderer {
                 ));
             }
             Self::validate_js_finite_array("path region cover vertices", &cover_vertices)?;
-            buffer_cache.path_region_frames = path_region_frames(
-                &wedge_vertices.to_vec(),
-                &Self::js_u32_array(&path_regions, "wedgeVertexOffsets")?.to_vec(),
-                &cover_vertices.to_vec(),
-            );
             let vao = self
                 .gl
                 .create_vertex_array()
@@ -5043,7 +5034,6 @@ impl Renderer {
         cache.path_sector_vertex_count = 0;
         cache.path_cover_vertex_count = 0;
         cache.path_clear_vertex_count = 0;
-        cache.path_region_frames = Vec::new();
     }
 
     fn path_region_cache_complete(cache: &BufferCache, path_regions: &PathRegions) -> bool {
@@ -5065,7 +5055,6 @@ impl Renderer {
 
         cache.path_cover_vao.is_some()
             && cache.path_clear_vao.is_some()
-            && cache.path_region_frames.len() == path_regions.region_count()
             && (!needs_wedge_cache || cache.path_wedge_vao.is_some())
             && (!needs_sector_cache || cache.path_sector_vao.is_some())
     }
@@ -5083,7 +5072,6 @@ impl Renderer {
         cache.path_clear_vao = built_cache.path_clear_vao.take();
         cache.path_clear_vertex_count = built_cache.path_clear_vertex_count;
         cache.path_clear_vertex_buffer = built_cache.path_clear_vertex_buffer.take();
-        cache.path_region_frames = std::mem::take(&mut built_cache.path_region_frames);
     }
 
     fn create_fbo(
@@ -5136,8 +5124,6 @@ impl Renderer {
         )
     }
 
-    /// General Gerber layers retain their historic linear RGBA fallback while
-    /// preferring an R8 coverage attachment whenever the driver supports it.
     /// General Gerber layers retain their historic linear RGBA fallback while
     /// preferring an R8 coverage attachment whenever the driver supports it.
     fn create_layer_mask_fbo(
@@ -6217,7 +6203,6 @@ impl Renderer {
                 buffer_cache.path_clear_vao.as_ref(),
                 quad_start,
                 6,
-                None,
             )?;
 
             self.gl.stencil_mask(0x02);
@@ -6239,7 +6224,6 @@ impl Renderer {
                     buffer_cache.path_wedge_vao.as_ref(),
                     wedge_start,
                     wedge_end - wedge_start,
-                    None,
                 )?;
             }
 
@@ -6257,7 +6241,6 @@ impl Renderer {
                     buffer_cache,
                     sector_start,
                     sector_end - sector_start,
-                    None,
                 )?;
             }
 
@@ -6275,7 +6258,6 @@ impl Renderer {
                 buffer_cache.path_cover_vao.as_ref(),
                 quad_start,
                 6,
-                None,
             )?;
 
             self.gl.stencil_mask(0x02);
@@ -6287,7 +6269,6 @@ impl Renderer {
                 buffer_cache.path_clear_vao.as_ref(),
                 quad_start,
                 6,
-                None,
             )?;
         }
 
@@ -6613,8 +6594,6 @@ impl Renderer {
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
-        viewport_width: u32,
-        viewport_height: u32,
     ) -> Result<(), JsValue> {
         if layer_id >= self.layers.len() {
             return Err(JsValue::from_str("Invalid layer index"));
@@ -6660,7 +6639,6 @@ impl Renderer {
                         "triangle template instance count",
                         template.instance_x.len(),
                     )?;
-                    let frame = oriented_frame_of_vertices(&template.vertices);
                     let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
                     pending_cache
                         .cache
@@ -6716,7 +6694,6 @@ impl Renderer {
                     template_cache.vao = built_template_cache.vao.take();
                     template_cache.vertex_count = vertex_count;
                     template_cache.instance_count = instance_count;
-                    template_cache.frame = frame;
                     template_cache.vertex_buffer = built_template_cache.vertex_buffer.take();
                     template_cache.instance_x_buffer =
                         built_template_cache.instance_x_buffer.take();
@@ -6749,30 +6726,6 @@ impl Renderer {
             if let Some(loc) = program.uniforms.get("color") {
                 self.gl.uniform4fv_with_f32_array(Some(loc), color);
             }
-            if let Some(loc) = program.uniforms.get("template_center") {
-                self.gl.uniform2f(
-                    Some(loc),
-                    template_cache.frame.center[0],
-                    template_cache.frame.center[1],
-                );
-            }
-            if let Some(loc) = program.uniforms.get("template_angle") {
-                self.gl.uniform1f(Some(loc), template_cache.frame.angle);
-            }
-            if let Some(loc) = program.uniforms.get("template_half_size") {
-                self.gl.uniform2f(
-                    Some(loc),
-                    template_cache.frame.half_size[0],
-                    template_cache.frame.half_size[1],
-                );
-            }
-            self.set_view_feature_uniforms(
-                program,
-                viewport_width,
-                viewport_height,
-                layer.inner_outline_pixels,
-                layer.inner_outline_world,
-            );
 
             self.gl
                 .draw_arrays_instanced(TRIANGLES, 0, vertex_count, instance_count);
@@ -7373,8 +7326,6 @@ impl Renderer {
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
-        viewport_width: u32,
-        viewport_height: u32,
     ) -> Result<(), JsValue> {
         let region_count = {
             let layer = self.layers[layer_id]
@@ -7413,14 +7364,6 @@ impl Renderer {
         let layer = self.get_layer(layer_id)?;
         let path_regions = &layer.gerber_data[sublayer_idx].path_regions;
         let buffer_cache = &layer.buffer_caches[sublayer_idx];
-        if buffer_cache.path_region_frames.len() != region_count {
-            return Err(JsValue::from_str("Path region frame cache is incomplete"));
-        }
-
-        for program in [&self.programs.path_solid, &self.programs.path_sector] {
-            self.gl.use_program(Some(&program.program));
-            self.set_view_feature_uniforms(program, viewport_width, viewport_height, 0.0, 0.0);
-        }
 
         self.gl.enable(STENCIL_TEST);
         self.gl.stencil_mask(0xff);
@@ -7429,7 +7372,6 @@ impl Renderer {
 
         let result = (|| {
             for region_idx in 0..region_count {
-                let region_bounds = Some(&buffer_cache.path_region_frames[region_idx]);
                 self.gl.color_mask(false, false, false, false);
                 self.gl.stencil_func(ALWAYS, 0, 0xff);
                 self.gl.stencil_op(KEEP, KEEP, INVERT);
@@ -7449,7 +7391,6 @@ impl Renderer {
                         buffer_cache.path_wedge_vao.as_ref(),
                         wedge_start,
                         wedge_end - wedge_start,
-                        region_bounds,
                     )?;
                 }
 
@@ -7467,7 +7408,6 @@ impl Renderer {
                         buffer_cache,
                         sector_start,
                         sector_end - sector_start,
-                        region_bounds,
                     )?;
                 }
 
@@ -7481,7 +7421,6 @@ impl Renderer {
                     buffer_cache.path_clear_vao.as_ref(),
                     Self::checked_path_region_quad_start(region_idx)?,
                     6,
-                    region_bounds,
                 )?;
 
                 self.gl.color_mask(false, false, false, false);
@@ -7493,7 +7432,6 @@ impl Renderer {
                     buffer_cache.path_clear_vao.as_ref(),
                     Self::checked_path_region_quad_start(region_idx)?,
                     6,
-                    region_bounds,
                 )?;
             }
 
@@ -7550,11 +7488,6 @@ impl Renderer {
             buffer_cache.path_sector_vertex_buffer = Some(buffer);
         }
 
-        buffer_cache.path_region_frames = path_region_frames(
-            &path_regions.wedge_vertices,
-            &path_regions.wedge_vertex_offsets,
-            &path_regions.cover_vertices,
-        );
         if !path_regions.cover_vertices.is_empty() {
             buffer_cache.path_cover_vertex_count = Self::checked_usize_to_i32(
                 "path region cover vertex count",
@@ -7672,24 +7605,6 @@ impl Renderer {
         Ok(())
     }
 
-    /// Point the path shaders at the region being drawn: its centre and
-    /// half size drive the minimum feature width scaling. `None` (used by
-    /// the highlight passes) disables the scaling for the draw.
-    fn set_path_region_uniforms(&self, program: &ShaderProgram, frame: Option<&ShapeFrame>) {
-        let frame = frame.copied().unwrap_or_default();
-        if let Some(loc) = program.uniforms.get("region_center") {
-            self.gl
-                .uniform2f(Some(loc), frame.center[0], frame.center[1]);
-        }
-        if let Some(loc) = program.uniforms.get("region_angle") {
-            self.gl.uniform1f(Some(loc), frame.angle);
-        }
-        if let Some(loc) = program.uniforms.get("region_half_size") {
-            self.gl
-                .uniform2f(Some(loc), frame.half_size[0], frame.half_size[1]);
-        }
-    }
-
     fn draw_path_solid_range(
         &self,
         transform: &[f32; 9],
@@ -7697,7 +7612,6 @@ impl Renderer {
         vao: Option<&web_sys::WebGlVertexArrayObject>,
         start: i32,
         count: i32,
-        region_bounds: Option<&ShapeFrame>,
     ) -> Result<(), JsValue> {
         if count <= 0 {
             return Ok(());
@@ -7715,7 +7629,6 @@ impl Renderer {
         if let Some(loc) = program.uniforms.get("color") {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
         }
-        self.set_path_region_uniforms(program, region_bounds);
         self.gl.draw_arrays(TRIANGLES, start, count);
         Ok(())
     }
@@ -7726,7 +7639,6 @@ impl Renderer {
         buffer_cache: &BufferCache,
         start: i32,
         count: i32,
-        region_bounds: Option<&ShapeFrame>,
     ) -> Result<(), JsValue> {
         if count <= 0 {
             return Ok(());
@@ -7741,7 +7653,6 @@ impl Renderer {
             self.gl
                 .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
         }
-        self.set_path_region_uniforms(program, region_bounds);
         self.gl.draw_arrays(TRIANGLES, start, count);
         Ok(())
     }
@@ -7770,8 +7681,9 @@ impl Renderer {
 
             // Set polarity blending mode. Positive coverage combines as a
             // union (MAX): a pixel is as covered as the most covering piece on
-            // it, so overlapping anti-aliased edges and pads held at the
-            // minimum feature width never add up past full coverage.
+            // it, so overlapping anti-aliased edges never add up past full
+            // coverage. With anti-aliasing off coverage is 0 or 1 and MAX
+            // gives the same mask as the previous clamped addition.
             // Negative polarity keeps the additive erase.
             self.gl.enable(BLEND);
             if mask_in_red && is_negative {
@@ -7808,8 +7720,6 @@ impl Renderer {
                 &white_color,
                 layer_id,
                 sublayer_idx,
-                viewport_width,
-                viewport_height,
             )?;
             self.draw_instanced_lines(
                 transform,
@@ -7836,14 +7746,7 @@ impl Renderer {
                 viewport_height,
             )?;
             self.draw_instanced_thermals(transform, &white_color, layer_id, sublayer_idx)?;
-            self.draw_path_regions(
-                transform,
-                &white_color,
-                layer_id,
-                sublayer_idx,
-                viewport_width,
-                viewport_height,
-            )?;
+            self.draw_path_regions(transform, &white_color, layer_id, sublayer_idx)?;
         }
 
         self.gl.blend_equation(FUNC_ADD);
@@ -10239,135 +10142,6 @@ impl Drop for Renderer {
         self.gl.delete_buffer(Some(&self.quad_buffer));
         Self::delete_shader_programs(&self.gl, &self.programs);
     }
-}
-
-/// Oriented frame of a point set: the mean is the pivot, the principal axis of
-/// the point covariance gives the angle, and the extents are the projections
-/// onto that axis and its normal. A rotated bar gets its own length and
-/// thickness, not the width and height of an axis-aligned box around it.
-/// Repeated points (fan centres, shared quad corners) count once. Returns the
-/// zero frame when a coordinate is not finite, so the shape stays unscaled.
-fn oriented_frame(points: &[[f32; 2]]) -> ShapeFrame {
-    let mut unique: Vec<[f32; 2]> = Vec::new();
-    let mut seen: HashSet<(u32, u32)> = HashSet::new();
-    for point in points {
-        if !point[0].is_finite() || !point[1].is_finite() {
-            return ShapeFrame::default();
-        }
-        if seen.insert((point[0].to_bits(), point[1].to_bits())) {
-            unique.push(*point);
-        }
-    }
-    if unique.is_empty() {
-        return ShapeFrame::default();
-    }
-    let count = unique.len() as f64;
-    let (mut mean_x, mut mean_y) = (0.0f64, 0.0f64);
-    for point in &unique {
-        mean_x += point[0] as f64;
-        mean_y += point[1] as f64;
-    }
-    mean_x /= count;
-    mean_y /= count;
-    let (mut cxx, mut cxy, mut cyy) = (0.0f64, 0.0f64, 0.0f64);
-    for point in &unique {
-        let dx = point[0] as f64 - mean_x;
-        let dy = point[1] as f64 - mean_y;
-        cxx += dx * dx;
-        cxy += dx * dy;
-        cyy += dy * dy;
-    }
-    let angle = if cxy.abs() < 1e-18 && (cxx - cyy).abs() < 1e-18 {
-        0.0
-    } else {
-        0.5 * (2.0 * cxy).atan2(cxx - cyy)
-    };
-    let (sin, cos) = angle.sin_cos();
-    let (mut min_u, mut max_u, mut min_v, mut max_v) = (
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-    );
-    for point in &unique {
-        let dx = point[0] as f64 - mean_x;
-        let dy = point[1] as f64 - mean_y;
-        let u = dx * cos + dy * sin;
-        let v = -dx * sin + dy * cos;
-        min_u = min_u.min(u);
-        max_u = max_u.max(u);
-        min_v = min_v.min(v);
-        max_v = max_v.max(v);
-    }
-    let mid_u = (min_u + max_u) * 0.5;
-    let mid_v = (min_v + max_v) * 0.5;
-    ShapeFrame {
-        center: [
-            (mean_x + mid_u * cos - mid_v * sin) as f32,
-            (mean_y + mid_u * sin + mid_v * cos) as f32,
-        ],
-        angle: angle as f32,
-        half_size: [
-            ((max_u - min_u) * 0.5) as f32,
-            ((max_v - min_v) * 0.5) as f32,
-        ],
-    }
-}
-
-/// Oriented frame of interleaved x/y vertices.
-fn oriented_frame_of_vertices(vertices: &[f32]) -> ShapeFrame {
-    let points: Vec<[f32; 2]> = vertices.chunks_exact(2).map(|p| [p[0], p[1]]).collect();
-    oriented_frame(&points)
-}
-
-/// One oriented frame per path region from the region's own contour points,
-/// so a thin slot is measured across its thickness whatever its rotation. The
-/// wedge triangles of a region are `(reference, start, end)` fans over its
-/// line segments and arc chunks, so every vertex but the first of each
-/// triangle lies on the contour; a region that produced no wedge triangles
-/// falls back to its cover quad. Computed once when the GPU cache is built,
-/// 20 bytes per region.
-fn path_region_frames(
-    wedge_vertices: &[f32],
-    wedge_vertex_offsets: &[u32],
-    cover_vertices: &[f32],
-) -> Vec<ShapeFrame> {
-    let fallback = path_region_frames_from_cover_quads(cover_vertices);
-    let region_count = wedge_vertex_offsets.len().saturating_sub(1);
-    let mut frames = Vec::with_capacity(region_count);
-    let mut points: Vec<[f32; 2]> = Vec::new();
-    for region_idx in 0..region_count {
-        let start = wedge_vertex_offsets[region_idx] as usize;
-        let end = (wedge_vertex_offsets[region_idx + 1] as usize).min(wedge_vertices.len() / 2);
-        points.clear();
-        let mut vertex = start;
-        while vertex + 3 <= end {
-            for corner in 1..3 {
-                let index = (vertex + corner) * 2;
-                points.push([wedge_vertices[index], wedge_vertices[index + 1]]);
-            }
-            vertex += 3;
-        }
-        frames.push(if points.len() >= 2 {
-            oriented_frame(&points)
-        } else {
-            fallback.get(region_idx).copied().unwrap_or_default()
-        });
-    }
-    frames
-}
-
-/// One axis-aligned frame per path region from its cover quad, whose six
-/// vertices start `min,min / max,min / min,max`.
-fn path_region_frames_from_cover_quads(cover_vertices: &[f32]) -> Vec<ShapeFrame> {
-    cover_vertices
-        .chunks_exact(12)
-        .map(|quad| ShapeFrame {
-            center: [(quad[0] + quad[2]) * 0.5, (quad[1] + quad[5]) * 0.5],
-            angle: 0.0,
-            half_size: [(quad[2] - quad[0]) * 0.5, (quad[5] - quad[1]) * 0.5],
-        })
-        .collect()
 }
 
 #[cfg(test)]

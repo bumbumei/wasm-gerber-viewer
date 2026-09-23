@@ -9,7 +9,6 @@ in float hole_y_instance;
 in float hole_radius_instance;
 uniform mat3 transform;
 uniform vec2 viewport_size;
-uniform float minimum_feature_pixels;
 uniform float anti_aliasing;
 out highp vec2 vPosition;
 out highp vec2 vHoleCenter;
@@ -34,13 +33,7 @@ float weakestPixelsPerWorld() {
 void main() {
     vec2 center = vec2(center_x_instance, center_y_instance);
     float pixelsPerWorld = max(weakestPixelsPerWorld(), 0.000001);
-    // Minimum visibility (see circle.vert.glsl). The hole keeps its world
-    // size, so it fades out first when the pad is held at the minimum.
-    float minimumRadius = minimum_feature_pixels > 0.0
-        ? max(0.5 * minimum_feature_pixels, 0.70710678) / pixelsPerWorld
-        : 0.0;
-    float trueRadius = max(radius_instance, 0.0);
-    float effectiveRadius = max(trueRadius, minimumRadius);
+    float effectiveRadius = max(radius_instance, 0.0);
     // Anti-aliasing fringe (see circle.vert.glsl): the quad grows by half a
     // pixel while vPosition keeps the true radius at 1.0.
     float safeRadius = max(effectiveRadius, 0.000000001);
