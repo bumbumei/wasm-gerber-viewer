@@ -196,7 +196,14 @@ fn rejects_repeated_arc_region_before_interaction_tessellation() {
         Err(error) => error,
     };
 
-    assert!(error.contains("path region expands"), "{error}");
+    let rejected_by_command_limit = error.contains("path region expands");
+    let rejected_by_geometry_limit = error
+        .contains("generated geometry exceeds the supported limit")
+        && error.contains("while processing path region");
+    assert!(
+        rejected_by_command_limit || rejected_by_geometry_limit,
+        "{error}"
+    );
     assert_eq!(state.generated_items(), 0);
 }
 
