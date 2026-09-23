@@ -170,7 +170,7 @@ impl ShaderPrograms {
                 "hole_y_instance",
                 "hole_radius_instance",
             ],
-            &["transform", "color", "viewport_size", "anti_aliasing"],
+            &["transform", "color", "anti_aliasing", "pixels_per_world"],
         )?;
         pending.track(&triangle);
 
@@ -222,6 +222,7 @@ impl ShaderPrograms {
                 "color",
                 "viewport_size",
                 "anti_aliasing",
+                "pixels_per_world",
                 "inner_outline_pixels",
                 "inner_outline_world",
             ],
@@ -241,7 +242,7 @@ impl ShaderPrograms {
                 "hole_y_instance",
                 "hole_radius_instance",
             ],
-            &["transform", "color", "viewport_size", "anti_aliasing"],
+            &["transform", "color", "anti_aliasing", "pixels_per_world"],
         )?;
         pending.track(&circle_holed);
 
@@ -264,6 +265,7 @@ impl ShaderPrograms {
                 "viewport_size",
                 "minimum_feature_pixels",
                 "anti_aliasing",
+                "pixels_per_world",
                 "inner_outline_pixels",
                 "inner_outline_world",
             ],

@@ -14,7 +14,7 @@ uniform float inner_outline_pixels;
 uniform float inner_outline_world;
 out highp float vSide;
 out highp float vInnerSide;
-// Change of vSide across one pixel (see circle.vert.glsl).
+// Change of vSide across one pixel for the anti-aliased edge.
 out highp float vEdgeWidth;
 
 vec2 clipToPixel(vec2 clipPosition) {
@@ -51,12 +51,17 @@ void main() {
         : 0.0;
     float outlinePixels = inner_outline_pixels + inner_outline_world * pixelsPerWorld;
     float expandedHalfWidthPixels = halfWidthPixels + outlinePixels;
-    // Anti-aliasing: the body grows by half a pixel on each side so the
-    // fragment shader's soft edge has room; abs(vSide) == 1.0 stays the true
-    // edge. Round caps are drawn separately as circles.
-    float drawnHalfWidthPixels = expandedHalfWidthPixels + (anti_aliasing > 0.5 ? 0.5 : 0.0);
-    vSide = position.y * (drawnHalfWidthPixels / max(expandedHalfWidthPixels, 0.000001));
-    vEdgeWidth = 1.0 / max(expandedHalfWidthPixels, 0.000001);
+    float drawnHalfWidthPixels = expandedHalfWidthPixels;
+    vSide = position.y;
+    vEdgeWidth = 0.0;
+    if (anti_aliasing > 0.5) {
+        // The body grows by half a pixel on each side so the soft edge has
+        // room; abs(vSide) == 1.0 stays the true edge. Round caps are drawn
+        // separately as circles.
+        drawnHalfWidthPixels = expandedHalfWidthPixels + 0.5;
+        vSide = position.y * (drawnHalfWidthPixels / max(expandedHalfWidthPixels, 0.000001));
+        vEdgeWidth = 1.0 / max(expandedHalfWidthPixels, 0.000001);
+    }
     vInnerSide = outlinePixels > 0.0 && expandedHalfWidthPixels > 0.000001
         ? halfWidthPixels / expandedHalfWidthPixels
         : 0.0;

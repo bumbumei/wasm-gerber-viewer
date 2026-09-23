@@ -4045,11 +4045,23 @@ impl Renderer {
     fn set_view_feature_uniforms(
         &self,
         program: &ShaderProgram,
+        transform: &[f32; 9],
         viewport_width: u32,
         viewport_height: u32,
         inner_outline_pixels: f32,
         inner_outline_world: f32,
     ) {
+        // Only the anti-aliased edges read the view scale, so it is computed
+        // here once per draw instead of per vertex, and not at all when the
+        // option is off.
+        if self.anti_aliasing {
+            if let Some(loc) = program.uniforms.get("pixels_per_world") {
+                self.gl.uniform1f(
+                    Some(loc),
+                    weakest_pixels_per_world(transform, viewport_width, viewport_height),
+                );
+            }
+        }
         if let Some(loc) = program.uniforms.get("viewport_size") {
             self.gl.uniform2f(
                 Some(loc),
@@ -6572,6 +6584,7 @@ impl Renderer {
         }
         self.set_view_feature_uniforms(
             program,
+            transform,
             viewport_width,
             viewport_height,
             layer.inner_outline_pixels,
@@ -6850,6 +6863,7 @@ impl Renderer {
         let layer = self.get_layer(layer_id)?;
         self.set_view_feature_uniforms(
             program,
+            transform,
             viewport_width,
             viewport_height,
             layer.inner_outline_pixels,
@@ -7011,6 +7025,7 @@ impl Renderer {
         let layer = self.get_layer(layer_id)?;
         self.set_view_feature_uniforms(
             program,
+            transform,
             viewport_width,
             viewport_height,
             layer.inner_outline_pixels,
@@ -7160,6 +7175,7 @@ impl Renderer {
         let layer = self.get_layer(layer_id)?;
         self.set_view_feature_uniforms(
             program,
+            transform,
             viewport_width,
             viewport_height,
             layer.inner_outline_pixels,
@@ -10141,6 +10157,38 @@ impl Drop for Renderer {
             .delete_vertex_array(Some(&self.fullscreen_vertex_array));
         self.gl.delete_buffer(Some(&self.quad_buffer));
         Self::delete_shader_programs(&self.gl, &self.programs);
+    }
+}
+
+/// Screen pixels per world unit along the weaker axis of a view transform
+/// (column-major 3x3, world to clip space): the smaller singular value of
+/// its 2x2 part scaled to pixels. Clamped away from zero so shaders can
+/// divide by it.
+fn weakest_pixels_per_world(
+    transform: &[f32; 9],
+    viewport_width: u32,
+    viewport_height: u32,
+) -> f32 {
+    let half_width = viewport_width.max(1) as f64 * 0.5;
+    let half_height = viewport_height.max(1) as f64 * 0.5;
+    let axis_x = [
+        transform[0] as f64 * half_width,
+        transform[1] as f64 * half_height,
+    ];
+    let axis_y = [
+        transform[3] as f64 * half_width,
+        transform[4] as f64 * half_height,
+    ];
+    let a = axis_x[0] * axis_x[0] + axis_x[1] * axis_x[1];
+    let b = axis_x[0] * axis_y[0] + axis_x[1] * axis_y[1];
+    let d = axis_y[0] * axis_y[0] + axis_y[1] * axis_y[1];
+    let discriminant = ((a - d) * (a - d) + 4.0 * b * b).max(0.0).sqrt();
+    let weakest_squared = ((a + d - discriminant) * 0.5).max(0.0);
+    let pixels_per_world = weakest_squared.sqrt() as f32;
+    if pixels_per_world.is_finite() {
+        pixels_per_world.max(0.000001)
+    } else {
+        0.000001
     }
 }
 
