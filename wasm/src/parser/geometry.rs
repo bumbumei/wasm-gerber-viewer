@@ -3086,7 +3086,7 @@ pub(crate) fn finish_region_contours(
             let interaction_bounds =
                 InteractionFeature::bounds_for_geometry(&[], &region_path_regions);
             let interaction_path_regions = region_path_regions.clone_for_interaction_pick();
-            path_regions.append(region_path_regions);
+            path_regions.append(region_path_regions)?;
             if let Some(bounds) = interaction_bounds {
                 let feature = InteractionFeature::from_geometry_with_bounds(
                     FeatureKind::Region,
@@ -3103,7 +3103,7 @@ pub(crate) fn finish_region_contours(
                 interaction_layer.push(feature);
             }
         } else {
-            path_regions.append(region_path_regions);
+            path_regions.append(region_path_regions)?;
         }
     } else {
         flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
