@@ -101,22 +101,38 @@ pub struct LayerMetadata {
 struct MsaaTarget {
     framebuffer: WebGlFramebuffer,
     color: web_sys::WebGlRenderbuffer,
-    /// `STENCIL_INDEX8` where the context multisamples it (1 byte per
-    /// sample), otherwise `DEPTH24_STENCIL8`.
-    stencil: web_sys::WebGlRenderbuffer,
+    /// Allocated the first time a layer that needs it (one with path
+    /// regions, the same test as the layer's own FBO) is drawn, then kept
+    /// for every later layer. `STENCIL_INDEX8` where the context
+    /// multisamples it at the colour's sample count, otherwise
+    /// `DEPTH24_STENCIL8`.
+    stencil: Option<web_sys::WebGlRenderbuffer>,
     width: u32,
     height: u32,
     internal_format: u32,
+    samples: i32,
 }
 
-/// Why a multisample target could not be created.
+/// Why a multisample target or its stencil could not be created. Each
+/// allocation is checked as soon as it is made, and the first failure is
+/// the one kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MsaaFailure {
-    /// Too few samples, an incomplete framebuffer or a GL error other than
-    /// memory: this context will not multisample the mask formats.
+    /// The context cannot multisample the mask: fewer than two samples, or
+    /// every candidate format is unsupported or incompatible in sample count
+    /// (`INVALID_OPERATION` from the storage call, `FRAMEBUFFER_UNSUPPORTED`
+    /// or `FRAMEBUFFER_INCOMPLETE_MULTISAMPLE`). Lasts until context restore.
     Unsupported,
-    /// `OUT_OF_MEMORY` at this size; a smaller canvas may still work.
-    OutOfMemory,
+    /// `OUT_OF_MEMORY` or `INVALID_VALUE` (a size the context will not
+    /// allocate). Not retried at this size; another size or toggling the
+    /// option retries.
+    SizeLimited,
+    /// The context was lost. Nothing is recorded; restoring the context
+    /// rebuilds the renderer.
+    ContextLost,
+    /// Any other GL error or framebuffer status, kept as reported. Not
+    /// retried until the option is toggled or the context restored.
+    Unexpected(u32),
 }
 
 /// Samples per pixel for the layer masks. Triangle edges (regions, macro
@@ -136,6 +152,8 @@ pub struct Renderer {
     /// Canvas size at which the last allocation failed for lack of memory.
     /// The same size is not retried every frame; a different size is.
     msaa_failed_size: Option<(u32, u32)>,
+    /// GL error or framebuffer status of an unexpected allocation failure.
+    msaa_unexpected_error: Option<u32>,
     layers: Vec<Option<LayerMetadata>>, // Sparse vec (None = deallocated slot)
     composites: Vec<Option<CompositeLayerMetadata>>,
     internal_layer_ids: HashSet<usize>,
@@ -1200,6 +1218,7 @@ impl Renderer {
             msaa_target: None,
             msaa_unsupported: false,
             msaa_failed_size: None,
+            msaa_unexpected_error: None,
             layers: Vec::new(),
             composites: Vec::new(),
             internal_layer_ids: HashSet::new(),
@@ -1259,6 +1278,7 @@ impl Renderer {
         // then; switching the option off and on is a request to try again.
         // Formats this context cannot multisample stay unsupported.
         self.msaa_failed_size = None;
+        self.msaa_unexpected_error = None;
         self.mark_all_layers_dirty();
     }
 
@@ -9141,12 +9161,16 @@ impl Renderer {
         }
 
         Self::drain_gl_errors(&self.gl);
-        let (framebuffer, color_format) = {
+        let (framebuffer, color_format, needs_stencil) = {
             let layer = self.get_layer(layer_idx)?;
-            (layer.fbo.framebuffer.clone(), layer.fbo.color_format)
+            (
+                layer.fbo.framebuffer.clone(),
+                layer.fbo.color_format,
+                layer.has_path_regions,
+            )
         };
         let msaa_framebuffer = Self::msaa_internal_format(color_format)
-            .and_then(|format| self.ensure_msaa_target(width, height, format))
+            .and_then(|format| self.ensure_msaa_target(width, height, format, needs_stencil))
             .map(|target| target.framebuffer.clone());
         if let Some(msaa_framebuffer) = &msaa_framebuffer {
             self.render_layer_mask_into(layer_idx, msaa_framebuffer, &transform, width, height)?;
@@ -9222,9 +9246,11 @@ impl Renderer {
         width: u32,
         height: u32,
         internal_format: u32,
+        needs_stencil: bool,
     ) -> Option<&MsaaTarget> {
         if !self.anti_aliasing
             || self.msaa_unsupported
+            || self.msaa_unexpected_error.is_some()
             || self.msaa_failed_size == Some((width, height))
         {
             return None;
@@ -9243,19 +9269,37 @@ impl Renderer {
                     self.msaa_failed_size = None;
                     self.msaa_target = Some(target);
                 }
-                Err(MsaaFailure::Unsupported) => {
-                    Self::drain_gl_errors(&self.gl);
-                    self.msaa_unsupported = true;
-                    return None;
-                }
-                Err(MsaaFailure::OutOfMemory) => {
-                    Self::drain_gl_errors(&self.gl);
-                    self.msaa_failed_size = Some((width, height));
+                Err(failure) => {
+                    self.note_msaa_failure(failure, width, height);
                     return None;
                 }
             }
         }
+        if needs_stencil {
+            let failure = self
+                .msaa_target
+                .as_mut()
+                .filter(|target| target.stencil.is_none())
+                .and_then(|target| Self::attach_msaa_stencil(&self.gl, target).err());
+            if let Some(failure) = failure {
+                // Rendering this layer's paths needs the stencil; without it
+                // the whole target is dropped rather than anti-aliasing some
+                // layers and not others.
+                self.release_msaa_target();
+                self.note_msaa_failure(failure, width, height);
+                return None;
+            }
+        }
         self.msaa_target.as_ref()
+    }
+
+    fn note_msaa_failure(&mut self, failure: MsaaFailure, width: u32, height: u32) {
+        match failure {
+            MsaaFailure::Unsupported => self.msaa_unsupported = true,
+            MsaaFailure::SizeLimited => self.msaa_failed_size = Some((width, height)),
+            MsaaFailure::ContextLost => {}
+            MsaaFailure::Unexpected(code) => self.msaa_unexpected_error = Some(code),
+        }
     }
 
     /// Give up multisampling on this context after a resolve failure.
@@ -9272,12 +9316,61 @@ impl Renderer {
         }
     }
 
+    /// The failure a GL call just reported, if any: context loss first, then
+    /// the error flag. Callers check right after each allocation, so the
+    /// error read here belongs to that allocation.
+    fn msaa_gl_failure(gl: &WebGl2RenderingContext) -> Option<MsaaFailure> {
+        if gl.is_context_lost() {
+            return Some(MsaaFailure::ContextLost);
+        }
+        match gl.get_error() {
+            WebGl2RenderingContext::NO_ERROR => None,
+            WebGl2RenderingContext::OUT_OF_MEMORY | WebGl2RenderingContext::INVALID_VALUE => {
+                Some(MsaaFailure::SizeLimited)
+            }
+            WebGl2RenderingContext::CONTEXT_LOST_WEBGL => Some(MsaaFailure::ContextLost),
+            code => Some(MsaaFailure::Unexpected(code)),
+        }
+    }
+
+    /// `renderbufferStorageMultisample` reports a sample count the format
+    /// cannot take as `INVALID_OPERATION`: a format/sample-count
+    /// incompatibility rather than an unexpected error.
+    fn msaa_storage_failure(gl: &WebGl2RenderingContext) -> Option<MsaaFailure> {
+        match Self::msaa_gl_failure(gl) {
+            Some(MsaaFailure::Unexpected(WebGl2RenderingContext::INVALID_OPERATION)) => {
+                Some(MsaaFailure::Unsupported)
+            }
+            other => other,
+        }
+    }
+
+    /// Framebuffer status after attaching a candidate: complete, a format or
+    /// sample-count incompatibility, or unexpected.
+    fn msaa_status_failure(status: u32) -> Option<MsaaFailure> {
+        match status {
+            WebGl2RenderingContext::FRAMEBUFFER_COMPLETE => None,
+            WebGl2RenderingContext::FRAMEBUFFER_UNSUPPORTED
+            | WebGl2RenderingContext::FRAMEBUFFER_INCOMPLETE_MULTISAMPLE => {
+                Some(MsaaFailure::Unsupported)
+            }
+            status => Some(MsaaFailure::Unexpected(status)),
+        }
+    }
+
+    /// A colour-only multisample target. The stencil is added later by
+    /// `attach_msaa_stencil`, only for layers that need it.
     fn create_msaa_target(
         gl: &WebGl2RenderingContext,
         width: u32,
         height: u32,
         internal_format: u32,
     ) -> Result<MsaaTarget, MsaaFailure> {
+        // Start from a clean error state so a failure below is this
+        // allocation's; an error already pending is reported, not dropped.
+        if let Some(failure) = Self::msaa_gl_failure(gl) {
+            return Err(failure);
+        }
         let max_samples = gl
             .get_parameter(WebGl2RenderingContext::MAX_SAMPLES)
             .ok()
@@ -9288,14 +9381,78 @@ impl Renderer {
             return Err(MsaaFailure::Unsupported);
         }
         let width_i32 =
-            Self::checked_u32_to_i32("MSAA width", width).map_err(|_| MsaaFailure::Unsupported)?;
+            Self::checked_u32_to_i32("MSAA width", width).map_err(|_| MsaaFailure::SizeLimited)?;
         let height_i32 = Self::checked_u32_to_i32("MSAA height", height)
-            .map_err(|_| MsaaFailure::Unsupported)?;
-        Self::drain_gl_errors(gl);
+            .map_err(|_| MsaaFailure::SizeLimited)?;
 
-        // A stencil-only buffer costs one byte per sample; fall back to the
-        // packed depth-stencil format where the context will not multisample
-        // it.
+        // WebGL returns no object only when the context is lost.
+        let framebuffer = gl.create_framebuffer().ok_or(MsaaFailure::ContextLost)?;
+        let Some(color) = gl.create_renderbuffer() else {
+            gl.delete_framebuffer(Some(&framebuffer));
+            return Err(MsaaFailure::ContextLost);
+        };
+        let target = MsaaTarget {
+            framebuffer,
+            color,
+            stencil: None,
+            width,
+            height,
+            internal_format,
+            samples,
+        };
+
+        gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, Some(&target.color));
+        gl.renderbuffer_storage_multisample(
+            WebGl2RenderingContext::RENDERBUFFER,
+            samples,
+            internal_format,
+            width_i32,
+            height_i32,
+        );
+        gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
+        if let Some(failure) = Self::msaa_storage_failure(gl) {
+            Self::delete_msaa_target(gl, target);
+            return Err(failure);
+        }
+
+        gl.bind_framebuffer(
+            WebGl2RenderingContext::FRAMEBUFFER,
+            Some(&target.framebuffer),
+        );
+        gl.framebuffer_renderbuffer(
+            WebGl2RenderingContext::FRAMEBUFFER,
+            WebGl2RenderingContext::COLOR_ATTACHMENT0,
+            WebGl2RenderingContext::RENDERBUFFER,
+            Some(&target.color),
+        );
+        let status = gl.check_framebuffer_status(WebGl2RenderingContext::FRAMEBUFFER);
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+        if let Some(failure) =
+            Self::msaa_gl_failure(gl).or_else(|| Self::msaa_status_failure(status))
+        {
+            Self::delete_msaa_target(gl, target);
+            return Err(failure);
+        }
+        Ok(target)
+    }
+
+    /// Adds a stencil renderbuffer at the target's size and sample count.
+    /// `STENCIL_INDEX8` costs one byte per sample; `DEPTH24_STENCIL8` is
+    /// tried only when the first is unsupported or incompatible in sample
+    /// count, never after a memory, size, context-loss or unexpected failure.
+    /// A rejected candidate is detached before the next one because the two
+    /// use different attachment points.
+    fn attach_msaa_stencil(
+        gl: &WebGl2RenderingContext,
+        target: &mut MsaaTarget,
+    ) -> Result<(), MsaaFailure> {
+        if let Some(failure) = Self::msaa_gl_failure(gl) {
+            return Err(failure);
+        }
+        let width_i32 = Self::checked_u32_to_i32("MSAA width", target.width)
+            .map_err(|_| MsaaFailure::SizeLimited)?;
+        let height_i32 = Self::checked_u32_to_i32("MSAA height", target.height)
+            .map_err(|_| MsaaFailure::SizeLimited)?;
         for (stencil_format, attachment) in [
             (
                 WebGl2RenderingContext::STENCIL_INDEX8,
@@ -9306,78 +9463,61 @@ impl Renderer {
                 WebGl2RenderingContext::DEPTH_STENCIL_ATTACHMENT,
             ),
         ] {
-            let framebuffer = gl.create_framebuffer().ok_or(MsaaFailure::OutOfMemory)?;
-            let color = match gl.create_renderbuffer() {
-                Some(color) => color,
-                None => {
-                    gl.delete_framebuffer(Some(&framebuffer));
-                    return Err(MsaaFailure::OutOfMemory);
-                }
-            };
-            let stencil = match gl.create_renderbuffer() {
-                Some(stencil) => stencil,
-                None => {
-                    gl.delete_framebuffer(Some(&framebuffer));
-                    gl.delete_renderbuffer(Some(&color));
-                    return Err(MsaaFailure::OutOfMemory);
-                }
-            };
-            let target = MsaaTarget {
-                framebuffer,
-                color,
-                stencil,
-                width,
-                height,
-                internal_format,
-            };
-
-            gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, Some(&target.color));
+            let stencil = gl.create_renderbuffer().ok_or(MsaaFailure::ContextLost)?;
+            gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, Some(&stencil));
             gl.renderbuffer_storage_multisample(
                 WebGl2RenderingContext::RENDERBUFFER,
-                samples,
-                internal_format,
-                width_i32,
-                height_i32,
-            );
-            gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, Some(&target.stencil));
-            gl.renderbuffer_storage_multisample(
-                WebGl2RenderingContext::RENDERBUFFER,
-                samples,
+                target.samples,
                 stencil_format,
                 width_i32,
                 height_i32,
             );
             gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
+            match Self::msaa_storage_failure(gl) {
+                None => {}
+                Some(MsaaFailure::Unsupported) => {
+                    gl.delete_renderbuffer(Some(&stencil));
+                    continue;
+                }
+                Some(failure) => {
+                    gl.delete_renderbuffer(Some(&stencil));
+                    return Err(failure);
+                }
+            }
+
             gl.bind_framebuffer(
                 WebGl2RenderingContext::FRAMEBUFFER,
                 Some(&target.framebuffer),
             );
             gl.framebuffer_renderbuffer(
                 WebGl2RenderingContext::FRAMEBUFFER,
-                WebGl2RenderingContext::COLOR_ATTACHMENT0,
-                WebGl2RenderingContext::RENDERBUFFER,
-                Some(&target.color),
-            );
-            gl.framebuffer_renderbuffer(
-                WebGl2RenderingContext::FRAMEBUFFER,
                 attachment,
                 WebGl2RenderingContext::RENDERBUFFER,
-                Some(&target.stencil),
+                Some(&stencil),
             );
             let status = gl.check_framebuffer_status(WebGl2RenderingContext::FRAMEBUFFER);
-            gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
-            let error = gl.get_error();
-            if status == WebGl2RenderingContext::FRAMEBUFFER_COMPLETE
-                && error == WebGl2RenderingContext::NO_ERROR
-            {
-                return Ok(target);
+            let failure = Self::msaa_gl_failure(gl).or_else(|| Self::msaa_status_failure(status));
+            if failure.is_some() {
+                gl.framebuffer_renderbuffer(
+                    WebGl2RenderingContext::FRAMEBUFFER,
+                    attachment,
+                    WebGl2RenderingContext::RENDERBUFFER,
+                    None,
+                );
             }
-            Self::drain_gl_errors(gl);
-            Self::delete_msaa_target(gl, target);
-            if error == WebGl2RenderingContext::OUT_OF_MEMORY {
-                // The size, not the format, is the problem: worth retrying at
-                // another size, pointless with another stencil format.
-                return Err(MsaaFailure::OutOfMemory);
+            gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+            match failure {
+                None => {
+                    target.stencil = Some(stencil);
+                    return Ok(());
+                }
+                Some(MsaaFailure::Unsupported) => {
+                    gl.delete_renderbuffer(Some(&stencil));
+                }
+                Some(failure) => {
+                    gl.delete_renderbuffer(Some(&stencil));
+                    return Err(failure);
+                }
             }
         }
         Err(MsaaFailure::Unsupported)
@@ -9386,7 +9526,9 @@ impl Renderer {
     fn delete_msaa_target(gl: &WebGl2RenderingContext, target: MsaaTarget) {
         gl.delete_framebuffer(Some(&target.framebuffer));
         gl.delete_renderbuffer(Some(&target.color));
-        gl.delete_renderbuffer(Some(&target.stencil));
+        if let Some(stencil) = &target.stencil {
+            gl.delete_renderbuffer(Some(stencil));
+        }
     }
 
     fn render_composite_fbo(
@@ -10111,6 +10253,7 @@ impl Renderer {
         }
         self.msaa_unsupported = false;
         self.msaa_failed_size = None;
+        self.msaa_unexpected_error = None;
         let old_programs = std::mem::replace(&mut self.programs, programs);
         let old_quad_buffer = std::mem::replace(&mut self.quad_buffer, quad_buffer);
         let old_fullscreen_vertex_array =
