@@ -126,12 +126,18 @@ async function run(page, { layers, steps, inject = {} }) {
       const ids = Object.fromEntries(layers.map((name) => [name, processor.add_layer(layerTexts[name])]));
       const snapshots = {};
       let frame = 0;
+      const errors = [];
       for (const step of steps) {
         if (step.render) {
           // Nudge the view so every render redraws the layer masks.
           const zoom = 0.2 * (1 + ++frame * 1e-4);
           const list = new Uint32Array(step.render.map((name) => ids[name]));
-          processor.render(list, new Float32Array(list.length * 4).fill(1), zoom, zoom, 0, 0, 1);
+          try {
+            processor.render(list, new Float32Array(list.length * 4).fill(1), zoom, zoom, 0, 0, 1);
+          } catch (error) {
+            if (!step.expectError) throw error;
+            errors.push(String(error?.message ?? error));
+          }
         } else if (step.resize) {
           processor.resize_to(...step.resize);
         } else if (step.toggle) {
@@ -140,11 +146,11 @@ async function run(page, { layers, steps, inject = {} }) {
         } else if (step.restoreContext) {
           lost = false;
         } else if (step.snapshot) {
-          snapshots[step.snapshot] = { storage: [...log.storage], detached: [...log.detached], blits: log.blits };
+          snapshots[step.snapshot] = { storage: [...log.storage], detached: [...log.detached], blits: log.blits, errors: [...errors] };
         }
       }
       processor.free?.();
-      return { ...snapshots, final: { storage: [...log.storage], detached: [...log.detached], blits: log.blits } };
+      return { ...snapshots, final: { storage: [...log.storage], detached: [...log.detached], blits: log.blits, errors } };
     },
     { layerTexts: LAYERS, layers, steps, inject },
   );
@@ -260,14 +266,18 @@ test("INVALID_VALUE is a size failure: retried at another size", async ({ page }
   expect(r.final.blits).toBe(1);
 });
 
-test("a lost context stops allocation at once and retries after restore", async ({ page }) => {
+test("a lost context stops allocation at once, fails the frame, and retries after restore", async ({ page }) => {
   const r = await run(page, {
     layers: ["pathPad"],
     inject: { loseAfterStorage: R8 },
-    steps: [{ render: ["pathPad"] }, { snapshot: "lost" }, { restoreContext: true }, { render: ["pathPad"] }],
+    steps: [{ render: ["pathPad"], expectError: true }, { snapshot: "lost" }, { restoreContext: true }, { render: ["pathPad"] }],
   });
   expect(r.lost.storage).toEqual([R8]);
   expect(r.lost.blits).toBe(0);
+  // The frame is abandoned rather than drawn point-sampled behind a lost context.
+  expect(r.lost.errors).toHaveLength(1);
+  expect(r.lost.errors[0]).toContain("context lost");
   expect(r.final.storage).toEqual([R8, R8, S8]);
   expect(r.final.blits).toBe(1);
+  expect(r.final.errors).toHaveLength(1);
 });

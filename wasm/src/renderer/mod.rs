@@ -135,6 +135,28 @@ enum MsaaFailure {
     Unexpected(u32),
 }
 
+/// How a batch of layer masks is being rendered, which decides what happens
+/// when multisampling becomes unavailable part-way through the batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaskRenderMode {
+    /// A whole frame (screen or offscreen pixels): every mask is redrawn
+    /// point-sampled in the same call, so the frame never mixes modes.
+    Frame,
+    /// One tile of a tiled export. Earlier tiles are already out of reach,
+    /// so the call fails instead of producing a tile in the other mode.
+    Tile,
+}
+
+/// Anti-aliasing state for diagnostics and tests.
+pub struct AntiAliasingDiagnostics {
+    pub enabled: bool,
+    pub status: &'static str,
+    pub target_allocated: bool,
+    pub stencil_allocated: bool,
+    pub failed_size: Option<(u32, u32)>,
+    pub unexpected_error: Option<u32>,
+}
+
 /// Samples per pixel for the layer masks. Triangle edges (regions, macro
 /// flashes, path regions) are anti-aliased by the multisampling; discs and
 /// line bodies compute their edge coverage analytically in the fragment
@@ -154,6 +176,11 @@ pub struct Renderer {
     msaa_failed_size: Option<(u32, u32)>,
     /// GL error or framebuffer status of an unexpected allocation failure.
     msaa_unexpected_error: Option<u32>,
+    /// Set when multisampling stops being available (allocation or resolve
+    /// failure) so the current batch of masks can be made consistent: the
+    /// masks already drawn multisampled are invalidated and redrawn
+    /// point-sampled before anything is composited.
+    msaa_fell_back: bool,
     layers: Vec<Option<LayerMetadata>>, // Sparse vec (None = deallocated slot)
     composites: Vec<Option<CompositeLayerMetadata>>,
     internal_layer_ids: HashSet<usize>,
@@ -1219,6 +1246,7 @@ impl Renderer {
             msaa_unsupported: false,
             msaa_failed_size: None,
             msaa_unexpected_error: None,
+            msaa_fell_back: false,
             layers: Vec::new(),
             composites: Vec::new(),
             internal_layer_ids: HashSet::new(),
@@ -7848,7 +7876,15 @@ impl Renderer {
         // Get transform matrix
         let transform = self.camera.get_transform_matrix(width, height);
 
-        self.render_with_transform(active_layer_ids, color_data, alpha, transform, true, None)
+        self.render_with_transform(
+            active_layer_ids,
+            color_data,
+            alpha,
+            transform,
+            true,
+            None,
+            MaskRenderMode::Frame,
+        )
     }
 
     /// Render geometry and optionally preserve the existing canvas contents.
@@ -7891,6 +7927,7 @@ impl Renderer {
             transform,
             clear_canvas,
             None,
+            MaskRenderMode::Frame,
         )
     }
 
@@ -7935,6 +7972,7 @@ impl Renderer {
             transform,
             clear_canvas,
             Some(blend_modes),
+            MaskRenderMode::Frame,
         )
     }
 
@@ -7978,20 +8016,22 @@ impl Renderer {
             )
         };
         let sources = &sources[..source_count];
-        for source in sources.iter().copied() {
-            self.ensure_mask_source_rendered(
-                source, transform, width, height, width_i32, height_i32,
-            )?;
-        }
         let outline_source = ResolvedMaskSource::new(outline_id, MaskSourceKind::InternalOutline);
-        self.ensure_mask_source_rendered(
-            outline_source,
-            transform,
-            width,
-            height,
-            width_i32,
-            height_i32,
-        )?;
+        self.with_consistent_masks(|renderer| {
+            for source in sources.iter().copied() {
+                renderer.ensure_mask_source_rendered(
+                    source, transform, width, height, width_i32, height_i32,
+                )?;
+            }
+            renderer.ensure_mask_source_rendered(
+                outline_source,
+                transform,
+                width,
+                height,
+                width_i32,
+                height_i32,
+            )
+        })?;
         let mut source_generations = [0u64; MAX_COMPOSITE_SOURCES];
         for (index, &source) in sources.iter().enumerate() {
             source_generations[index] = self.mask_source_generation(source)?;
@@ -8247,7 +8287,9 @@ impl Renderer {
             return Ok(-1);
         }
         let transform = self.camera.get_transform_matrix(width, height);
-        self.render_composite_fbo(composite_id, transform, width, height)?;
+        self.with_consistent_masks(|renderer| {
+            renderer.render_composite_fbo(composite_id, transform, width, height)
+        })?;
         if !self.read_composite_output_active(composite_id, x, y)? {
             return Ok(-1);
         }
@@ -8300,7 +8342,9 @@ impl Renderer {
         let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
         let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
         let transform = self.camera.get_transform_matrix(width, height);
-        self.render_composite_fbo(composite_id, transform, width, height)?;
+        self.with_consistent_masks(|renderer| {
+            renderer.render_composite_fbo(composite_id, transform, width, height)
+        })?;
         self.ensure_composite_membership_scratch_owner(composite_id, transform, width, height)?;
 
         let membership = self
@@ -8800,7 +8844,15 @@ impl Renderer {
             tile_height,
         );
 
-        self.render_with_transform(active_layer_ids, color_data, alpha, transform, true, None)
+        self.render_with_transform(
+            active_layer_ids,
+            color_data,
+            alpha,
+            transform,
+            true,
+            None,
+            MaskRenderMode::Tile,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8860,6 +8912,7 @@ impl Renderer {
             transform,
             true,
             Some(blend_modes),
+            MaskRenderMode::Tile,
         )
     }
 
@@ -8908,7 +8961,13 @@ impl Renderer {
 
         let output_fbo = Self::create_fbo(&self.gl, width, height, false)?;
         let result = (|| {
-            self.render_layer_fbos(active_layer_ids, transform, width, height)?;
+            self.render_layer_fbos(
+                active_layer_ids,
+                transform,
+                width,
+                height,
+                MaskRenderMode::Frame,
+            )?;
             self.composite_layers_to_target(
                 active_layer_ids,
                 color_data,
@@ -8997,7 +9056,13 @@ impl Renderer {
 
         let output_fbo = Self::create_fbo(&self.gl, width, height, false)?;
         let result = (|| {
-            self.render_layer_fbos(active_layer_ids, transform, width, height)?;
+            self.render_layer_fbos(
+                active_layer_ids,
+                transform,
+                width,
+                height,
+                MaskRenderMode::Frame,
+            )?;
             self.composite_layers_to_target(
                 active_layer_ids,
                 color_data,
@@ -9046,6 +9111,7 @@ impl Renderer {
         transform: [f32; 9],
         clear_canvas: bool,
         blend_modes: Option<&[u8]>,
+        mode: MaskRenderMode,
     ) -> Result<(), JsValue> {
         let (width, height) = self.get_canvas_size()?;
         if width == 0 || height == 0 {
@@ -9054,7 +9120,7 @@ impl Renderer {
         let _raster_write_guard = RasterWriteStateGuard::normalize(&self.gl)?;
 
         // STEP 1: Render active layer geometry to FBOs only when geometry/camera state changed.
-        self.render_layer_fbos(active_layer_ids, transform, width, height)?;
+        self.render_layer_fbos(active_layer_ids, transform, width, height, mode)?;
 
         // STEP 2: Composite FBOs to canvas
         self.composite_layers(
@@ -9074,6 +9140,7 @@ impl Renderer {
         transform: [f32; 9],
         width: u32,
         height: u32,
+        mode: MaskRenderMode,
     ) -> Result<(), JsValue> {
         self.ensure_composite_selection_inactive()?;
         let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
@@ -9122,6 +9189,57 @@ impl Renderer {
             }
         }
 
+        // Decide whether this batch multisamples before any mask is drawn, so
+        // an allocation failure never leaves the batch half multisampled.
+        self.preflight_msaa(active_layer_ids, width, height)?;
+        self.render_active_masks(
+            active_layer_ids,
+            transform,
+            width,
+            height,
+            width_i32,
+            height_i32,
+        )?;
+        if self.take_msaa_fallback()? {
+            // Multisampling stopped part-way (a resolve or target switch
+            // failed): the masks drawn so far in this batch are
+            // multisampled and the rest are not. Drop them all.
+            self.mark_all_layers_dirty();
+            match mode {
+                MaskRenderMode::Frame => {
+                    // Point-sampled from here on, so one more pass gives a
+                    // consistent frame.
+                    self.render_active_masks(
+                        active_layer_ids,
+                        transform,
+                        width,
+                        height,
+                        width_i32,
+                        height_i32,
+                    )?;
+                }
+                MaskRenderMode::Tile => {
+                    return Err(JsValue::from_str(
+                        "Anti-aliasing became unavailable during a tiled render; the tile was \
+                         not produced so the export does not mix anti-aliased and point-sampled \
+                         tiles. Retry the export.",
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn render_active_masks(
+        &mut self,
+        active_layer_ids: &[u32],
+        transform: [f32; 9],
+        width: u32,
+        height: u32,
+        width_i32: i32,
+        height_i32: i32,
+    ) -> Result<(), JsValue> {
         for &layer_id in active_layer_ids {
             let layer_idx = layer_id as usize;
             if self.composites.get(layer_idx).is_some_and(Option::is_some) {
@@ -9141,6 +9259,115 @@ impl Renderer {
         }
 
         Ok(())
+    }
+
+    /// Whether multisampling stopped being available since the last call.
+    /// A lost context is an error, not a fallback: nothing is recorded and
+    /// the frame is abandoned until the context is restored.
+    fn take_msaa_fallback(&mut self) -> Result<bool, JsValue> {
+        let fell_back = std::mem::take(&mut self.msaa_fell_back);
+        if self.gl.is_context_lost() {
+            return Err(JsValue::from_str(
+                "WebGL context lost while rendering layer masks",
+            ));
+        }
+        Ok(fell_back)
+    }
+
+    /// Runs `render` (which draws layer masks) and, if multisampling stopped
+    /// being available during it, invalidates every mask and runs it once
+    /// more so the masks it produced are all point-sampled.
+    fn with_consistent_masks(
+        &mut self,
+        mut render: impl FnMut(&mut Self) -> Result<(), JsValue>,
+    ) -> Result<(), JsValue> {
+        self.msaa_fell_back = false;
+        render(self)?;
+        if self.take_msaa_fallback()? {
+            self.mark_all_layers_dirty();
+            render(self)?;
+        }
+        Ok(())
+    }
+
+    /// Makes the multisample target (and its stencil, when a layer with path
+    /// regions is among the masks to draw) available before the first mask
+    /// of a batch is drawn. Nothing is allocated when the current target
+    /// already fits. If the allocation fails, the batch is point-sampled
+    /// from the start and any multisampled masks still cached are dropped.
+    fn preflight_msaa(
+        &mut self,
+        active_layer_ids: &[u32],
+        width: u32,
+        height: u32,
+    ) -> Result<(), JsValue> {
+        if !self.anti_aliasing {
+            return Ok(());
+        }
+        let (first_format, needs_stencil) = self.frame_mask_needs(active_layer_ids);
+        let Some(format) = first_format else {
+            return Ok(());
+        };
+        self.msaa_fell_back = false;
+        let _ = self.ensure_msaa_target(width, height, format, needs_stencil);
+        if self.take_msaa_fallback()? {
+            self.mark_all_layers_dirty();
+        }
+        Ok(())
+    }
+
+    /// The multisample format of the first mask this batch will draw and
+    /// whether any of them needs the stencil: the active Gerber layers plus
+    /// the sources and outline masks of the active composites.
+    fn frame_mask_needs(&self, active_layer_ids: &[u32]) -> (Option<u32>, bool) {
+        let mut first_format = None;
+        let mut needs_stencil = false;
+        let mut pending: Vec<usize> = active_layer_ids.iter().map(|&id| id as usize).collect();
+        let mut seen_composites: HashSet<usize> = HashSet::new();
+        while let Some(idx) = pending.pop() {
+            if let Some(composite) = self.composites.get(idx).and_then(Option::as_ref) {
+                if !seen_composites.insert(idx) {
+                    continue;
+                }
+                pending.extend(composite.sources.iter().map(|source| source.layer_id()));
+                pending.push(composite.outline_mask_id);
+                continue;
+            }
+            if let Some(layer) = self.layers.get(idx).and_then(Option::as_ref) {
+                if first_format.is_none() {
+                    first_format = Self::msaa_internal_format(layer.fbo.color_format);
+                }
+                needs_stencil |= layer.has_path_regions;
+            }
+        }
+        (first_format, needs_stencil)
+    }
+
+    pub fn anti_aliasing_diagnostics(&self) -> AntiAliasingDiagnostics {
+        let status = if !self.anti_aliasing {
+            "off"
+        } else if self.msaa_unsupported {
+            "unsupported"
+        } else if self.msaa_unexpected_error.is_some() {
+            "unexpected"
+        } else if self.msaa_failed_size.is_some() {
+            "size-limited"
+        } else if self.msaa_target.is_some() {
+            "ready"
+        } else {
+            "pending"
+        };
+        AntiAliasingDiagnostics {
+            enabled: self.anti_aliasing,
+            status,
+            target_allocated: self.msaa_target.is_some(),
+            stencil_allocated: self
+                .msaa_target
+                .as_ref()
+                .is_some_and(|target| target.stencil.is_some()),
+            failed_size: self.msaa_failed_size,
+            unexpected_error: self.msaa_unexpected_error,
+        }
     }
 
     fn render_gerber_fbo(
@@ -9172,6 +9399,11 @@ impl Renderer {
         let msaa_framebuffer = Self::msaa_internal_format(color_format)
             .and_then(|format| self.ensure_msaa_target(width, height, format, needs_stencil))
             .map(|target| target.framebuffer.clone());
+        if self.anti_aliasing && msaa_framebuffer.is_none() && self.gl.is_context_lost() {
+            return Err(JsValue::from_str(
+                "WebGL context lost while rendering layer masks",
+            ));
+        }
         if let Some(msaa_framebuffer) = &msaa_framebuffer {
             self.render_layer_mask_into(layer_idx, msaa_framebuffer, &transform, width, height)?;
             // A geometry draw error is a rendering error like before, not a
@@ -9195,8 +9427,14 @@ impl Renderer {
             self.gl
                 .bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, None);
             if self.gl.get_error() != WebGl2RenderingContext::NO_ERROR {
+                if self.gl.is_context_lost() {
+                    return Err(JsValue::from_str(
+                        "WebGL context lost while rendering layer masks",
+                    ));
+                }
                 // This context cannot resolve the multisampled mask; render
-                // directly from now on.
+                // directly from now on. The caller sees the fallback and
+                // redraws the masks already multisampled in this batch.
                 Self::drain_gl_errors(&self.gl);
                 self.disable_msaa();
                 self.render_layer_mask_into(layer_idx, &framebuffer, &transform, width, height)?;
@@ -9297,9 +9535,10 @@ impl Renderer {
         match failure {
             MsaaFailure::Unsupported => self.msaa_unsupported = true,
             MsaaFailure::SizeLimited => self.msaa_failed_size = Some((width, height)),
-            MsaaFailure::ContextLost => {}
+            MsaaFailure::ContextLost => return,
             MsaaFailure::Unexpected(code) => self.msaa_unexpected_error = Some(code),
         }
+        self.msaa_fell_back = true;
     }
 
     /// Give up multisampling on this context after a resolve failure.
@@ -9308,6 +9547,7 @@ impl Renderer {
             Self::delete_msaa_target(&self.gl, target);
         }
         self.msaa_unsupported = true;
+        self.msaa_fell_back = true;
     }
 
     fn release_msaa_target(&mut self) {

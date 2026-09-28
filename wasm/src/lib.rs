@@ -1108,6 +1108,47 @@ impl GerberProcessor {
             .get_composite_error(composite_id as usize)
     }
 
+    /// Anti-aliasing state: `enabled`, `status` (off, pending, ready,
+    /// size-limited, unsupported, unexpected), whether the shared multisample
+    /// target and its stencil are allocated, the size a memory-limited
+    /// allocation failed at, and the code of an unexpected GL failure.
+    pub fn get_anti_aliasing_diagnostics(&self) -> Result<JsValue, JsValue> {
+        let diagnostics = self
+            .renderer
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .anti_aliasing_diagnostics();
+        let object = Object::new();
+        let set = |name: &str, value: JsValue| {
+            Reflect::set(&object, &JsValue::from_str(name), &value)
+                .map(|_| ())
+                .map_err(|_| JsValue::from_str("Failed to build anti-aliasing diagnostics"))
+        };
+        set("enabled", JsValue::from_bool(diagnostics.enabled))?;
+        set("status", JsValue::from_str(diagnostics.status))?;
+        set("target", JsValue::from_bool(diagnostics.target_allocated))?;
+        set("stencil", JsValue::from_bool(diagnostics.stencil_allocated))?;
+        set(
+            "failedSize",
+            match diagnostics.failed_size {
+                Some((width, height)) => {
+                    let size = js_sys::Array::new();
+                    size.push(&JsValue::from_f64(width as f64));
+                    size.push(&JsValue::from_f64(height as f64));
+                    size.into()
+                }
+                None => JsValue::NULL,
+            },
+        )?;
+        set(
+            "unexpectedError",
+            diagnostics
+                .unexpected_error
+                .map_or(JsValue::NULL, |code| JsValue::from_f64(code as f64)),
+        )?;
+        Ok(object.into())
+    }
+
     pub fn get_composite_diagnostics(&self, composite_id: u32) -> Result<JsValue, JsValue> {
         let diagnostics = self
             .renderer
