@@ -7688,6 +7688,10 @@ impl Renderer {
         }
 
         let white_color = [1.0, 1.0, 1.0, 1.0];
+        // Anti-aliased clear sublayers draw with zero: the anti-aliasing
+        // shaders then write 1 - coverage, every other shader writes 0, and
+        // the MIN blend keeps the smaller of that and the mask.
+        let clear_color = [0.0, 0.0, 0.0, 0.0];
 
         // Get sublayer count
         let sublayer_count = self.get_layer(layer_id)?.gerber_data.len();
@@ -7702,9 +7706,30 @@ impl Renderer {
             // it, so overlapping anti-aliased edges never add up past full
             // coverage. With anti-aliasing off coverage is 0 or 1 and MAX
             // gives the same mask as the previous clamped addition.
-            // Negative polarity keeps the additive erase.
+            //
+            // Clear coverage with anti-aliasing is the matching difference
+            // (MIN with 1 - coverage), so drawing the same clear shape twice
+            // leaves the mask as drawing it once; the previous multiplicative
+            // erase would take a half-covered edge from 1 to 0.5 to 0.25.
+            // Without anti-aliasing coverage is 0 or 1, where both agree, so
+            // the Off path keeps the multiplicative erase unchanged. Every
+            // branch sets both blend equations.
+            let clear_with_coverage = is_negative && self.anti_aliasing;
+            let mask_color = if clear_with_coverage {
+                &clear_color
+            } else {
+                &white_color
+            };
             self.gl.enable(BLEND);
-            if mask_in_red && is_negative {
+            if clear_with_coverage && mask_in_red {
+                self.gl.blend_func(ONE, ONE);
+                self.gl.blend_equation(WebGl2RenderingContext::MIN);
+            } else if clear_with_coverage {
+                // Colour untouched, alpha (the coverage) takes the minimum.
+                self.gl.blend_func_separate(ZERO, ONE, ONE, ONE);
+                self.gl
+                    .blend_equation_separate(FUNC_ADD, WebGl2RenderingContext::MIN);
+            } else if mask_in_red && is_negative {
                 // R8 masks accumulate polarity in red rather than alpha.
                 // Clear coverage erases destination red.
                 self.gl.blend_func(ZERO, ONE_MINUS_SRC_ALPHA);
@@ -7727,21 +7752,16 @@ impl Renderer {
             // Render all shapes (empty checks done inside draw methods)
             self.draw_instanced_triangles(
                 transform,
-                &white_color,
+                mask_color,
                 layer_id,
                 sublayer_idx,
                 viewport_width,
                 viewport_height,
             )?;
-            self.draw_instanced_triangle_templates(
-                transform,
-                &white_color,
-                layer_id,
-                sublayer_idx,
-            )?;
+            self.draw_instanced_triangle_templates(transform, mask_color, layer_id, sublayer_idx)?;
             self.draw_instanced_lines(
                 transform,
-                &white_color,
+                mask_color,
                 layer_id,
                 sublayer_idx,
                 viewport_width,
@@ -7749,7 +7769,7 @@ impl Renderer {
             )?;
             self.draw_instanced_circles(
                 transform,
-                &white_color,
+                mask_color,
                 layer_id,
                 sublayer_idx,
                 viewport_width,
@@ -7757,14 +7777,14 @@ impl Renderer {
             )?;
             self.draw_instanced_arcs(
                 transform,
-                &white_color,
+                mask_color,
                 layer_id,
                 sublayer_idx,
                 viewport_width,
                 viewport_height,
             )?;
-            self.draw_instanced_thermals(transform, &white_color, layer_id, sublayer_idx)?;
-            self.draw_path_regions(transform, &white_color, layer_id, sublayer_idx)?;
+            self.draw_instanced_thermals(transform, mask_color, layer_id, sublayer_idx)?;
+            self.draw_path_regions(transform, mask_color, layer_id, sublayer_idx)?;
         }
 
         self.gl.blend_equation(FUNC_ADD);

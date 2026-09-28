@@ -25,5 +25,7 @@ void main() {
         alpha *= clamp((dist - vInnerRadius) / vEdgeWidth + 0.5, 0.0, 1.0);
     }
     if (alpha <= 0.0) discard;
-    fragColor = color * alpha;
+    // Dark sublayers pass white and write the coverage; clear sublayers
+    // pass zero and write 1 - coverage, which the MIN blend keeps.
+    fragColor = mix(vec4(1.0) - color, color, alpha);
 }
