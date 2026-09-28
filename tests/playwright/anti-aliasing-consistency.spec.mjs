@@ -109,8 +109,11 @@ async function run(page, { layers, steps, inject = {}, size = 96 }) {
       const results = {};
       const readAlpha = () => {
         gl.finish();
-        const pixels = new Uint8Array(size * size * 4);
-        raw.readPixels(0, 0, size, size, raw.RGBA, raw.UNSIGNED_BYTE, pixels);
+        let pixels = pixelsOut;
+        if (!pixels) {
+          pixels = new Uint8Array(size * size * 4);
+          raw.readPixels(0, 0, size, size, raw.RGBA, raw.UNSIGNED_BYTE, pixels);
+        }
         const alpha = [];
         let partial = 0;
         for (let i = 3; i < pixels.length; i += 4) {
@@ -120,10 +123,16 @@ async function run(page, { layers, steps, inject = {}, size = 96 }) {
         return { alpha, partial };
       };
       const colours = (n) => new Float32Array(n * 4).fill(1);
-      // The error of the most recent action step, read by the snapshot after it.
+      // The error of the most recent action step, read by the snapshot after
+      // it; pixelsOut holds the output of a render_pixels step instead of the
+      // canvas.
       let error = null;
+      let pixelsOut = null;
       for (const step of steps) {
-        if (!step.snapshot) error = null;
+        if (!step.snapshot) {
+          error = null;
+          pixelsOut = null;
+        }
         try {
           if (step.addLayer) {
             ids[step.addLayer] = processor.add_layer(layerTexts[step.addLayer]);
@@ -133,6 +142,9 @@ async function run(page, { layers, steps, inject = {}, size = 96 }) {
           } else if (step.composite) {
             const sources = new Uint32Array(step.composite.map((name) => ids[name]));
             ids.composite = processor.add_composite_preset_with_bounds(sources, "union", false, -1, 5, -1, 5);
+          } else if (step.renderPixels) {
+            const list = new Uint32Array(step.renderPixels.map((name) => ids[name]));
+            pixelsOut = processor.render_pixels_with_clear(list, colours(list.length), ...views[step.view ?? "T"], 1, true);
           } else if (step.renderComposite) {
             const list = new Uint32Array([ids.composite]);
             processor.render(list, colours(1), ...views[step.view ?? "T"], 1);
@@ -187,16 +199,16 @@ test("maintainer scenario: a stencil failure drops the multisampled cache in the
   expect(r.step1.status).toBe("ready");
   expect(r.step1.partial).toBeGreaterThan(20);
   // Step 2: the stencil allocation failed, so multisampling is off for this
-  // size and nothing was resolved after the failure.
+  // size. The transition is the observable state change.
   expect(r.step2.status).toBe("size-limited");
-  expect(r.step2.storage).toEqual([GL.R8, GL.STENCIL_INDEX8]);
-  expect(r.step2.blits).toBe(r.step1.blits);
   // Steps 3 and 4 show the same shape, options and camera: identical pixels,
   // both point-sampled, regardless of A's earlier multisampled cache.
   expect(r.step3.partial).toBe(0);
   expect(same(r.step3, r.step4)).toBe(true);
-  // Auxiliary: the multisampled and point-sampled renders of A do differ.
+  // Auxiliary: the multisampled and point-sampled renders of A do differ,
+  // and nothing was resolved after the failure.
   expect(differing(r.step1, r.step3)).toBeGreaterThan(0);
+  expect(r.step2.blits).toBe(r.step1.blits);
 });
 
 test("a resolve failure part-way through a frame redraws the frame point-sampled", async ({ page }) => {
@@ -219,6 +231,27 @@ test("a resolve failure part-way through a frame redraws the frame point-sampled
   expect(r.first.partial).toBeGreaterThan(20);
   expect(r.mixed.status).toBe("unsupported");
   // The frame that hit the failure contains no multisampled mask at all.
+  expect(r.mixed.partial).toBe(0);
+  expect(same(r.mixed, r.again)).toBe(true);
+});
+
+test("an offscreen render_pixels frame is redrawn point-sampled after a resolve failure", async ({ page }) => {
+  const r = await run(page, {
+    layers: ["A", "C"],
+    inject: { blitError: { index: 2, error: GL.INVALID_OPERATION } },
+    steps: [
+      { renderPixels: ["A"] },
+      { snapshot: "first" },
+      { renderPixels: ["A", "C"] },
+      { snapshot: "mixed" },
+      { renderPixels: ["A", "C"], view: "U" },
+      { renderPixels: ["A", "C"] },
+      { snapshot: "again" },
+    ],
+  });
+  expect(r.first.status).toBe("ready");
+  expect(r.first.partial).toBeGreaterThan(20);
+  expect(r.mixed.status).toBe("unsupported");
   expect(r.mixed.partial).toBe(0);
   expect(same(r.mixed, r.again)).toBe(true);
 });

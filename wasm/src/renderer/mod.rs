@@ -4859,6 +4859,10 @@ impl Renderer {
     }
 
     fn mark_all_layers_dirty(&mut self) {
+        // Dropping every cached mask is what a multisampling fallback asks
+        // for, so a pending fallback is satisfied here (also when the caller
+        // is a resize, an option change or a context restore).
+        self.msaa_fell_back = false;
         self.composite_errors.clear();
         for layer in self.layers.iter_mut().flatten() {
             layer.fbo_dirty = true;
@@ -9191,7 +9195,7 @@ impl Renderer {
 
         // Decide whether this batch multisamples before any mask is drawn, so
         // an allocation failure never leaves the batch half multisampled.
-        self.preflight_msaa(active_layer_ids, width, height)?;
+        self.preflight_msaa(active_layer_ids, width, height);
         self.render_active_masks(
             active_layer_ids,
             transform,
@@ -9200,7 +9204,7 @@ impl Renderer {
             width_i32,
             height_i32,
         )?;
-        if self.take_msaa_fallback()? {
+        if self.msaa_fell_back {
             // Multisampling stopped part-way (a resolve or target switch
             // failed): the masks drawn so far in this batch are
             // multisampled and the rest are not. Drop them all.
@@ -9261,29 +9265,17 @@ impl Renderer {
         Ok(())
     }
 
-    /// Whether multisampling stopped being available since the last call.
-    /// A lost context is an error, not a fallback: nothing is recorded and
-    /// the frame is abandoned until the context is restored.
-    fn take_msaa_fallback(&mut self) -> Result<bool, JsValue> {
-        let fell_back = std::mem::take(&mut self.msaa_fell_back);
-        if self.gl.is_context_lost() {
-            return Err(JsValue::from_str(
-                "WebGL context lost while rendering layer masks",
-            ));
-        }
-        Ok(fell_back)
-    }
-
     /// Runs `render` (which draws layer masks) and, if multisampling stopped
     /// being available during it, invalidates every mask and runs it once
-    /// more so the masks it produced are all point-sampled.
+    /// more so the masks it produced are all point-sampled. The flag is not
+    /// cleared on entry: a fallback left behind by an earlier batch that
+    /// ended in an error is honoured here.
     fn with_consistent_masks(
         &mut self,
         mut render: impl FnMut(&mut Self) -> Result<(), JsValue>,
     ) -> Result<(), JsValue> {
-        self.msaa_fell_back = false;
         render(self)?;
-        if self.take_msaa_fallback()? {
+        if self.msaa_fell_back {
             self.mark_all_layers_dirty();
             render(self)?;
         }
@@ -9293,54 +9285,65 @@ impl Renderer {
     /// Makes the multisample target (and its stencil, when a layer with path
     /// regions is among the masks to draw) available before the first mask
     /// of a batch is drawn. Nothing is allocated when the current target
-    /// already fits. If the allocation fails, the batch is point-sampled
-    /// from the start and any multisampled masks still cached are dropped.
-    fn preflight_msaa(
-        &mut self,
-        active_layer_ids: &[u32],
-        width: u32,
-        height: u32,
-    ) -> Result<(), JsValue> {
-        if !self.anti_aliasing {
-            return Ok(());
+    /// already fits. If the allocation fails, or a fallback from an earlier
+    /// batch is still pending, every cached mask is dropped so the batch is
+    /// point-sampled from the start. Costs one bool read with the option off.
+    fn preflight_msaa(&mut self, active_layer_ids: &[u32], width: u32, height: u32) {
+        if self.anti_aliasing {
+            let (first_format, needs_stencil) = self.frame_mask_needs(active_layer_ids);
+            if let Some(format) = first_format {
+                let _ = self.ensure_msaa_target(width, height, format, needs_stencil);
+            }
         }
-        let (first_format, needs_stencil) = self.frame_mask_needs(active_layer_ids);
-        let Some(format) = first_format else {
-            return Ok(());
-        };
-        self.msaa_fell_back = false;
-        let _ = self.ensure_msaa_target(width, height, format, needs_stencil);
-        if self.take_msaa_fallback()? {
+        if self.msaa_fell_back {
             self.mark_all_layers_dirty();
         }
-        Ok(())
     }
 
     /// The multisample format of the first mask this batch will draw and
-    /// whether any of them needs the stencil: the active Gerber layers plus
-    /// the sources and outline masks of the active composites.
+    /// whether any of them needs the stencil: the active Gerber layers in
+    /// draw order, with the sources and outline mask of each active
+    /// composite. Walks the existing structures without allocating.
     fn frame_mask_needs(&self, active_layer_ids: &[u32]) -> (Option<u32>, bool) {
         let mut first_format = None;
         let mut needs_stencil = false;
-        let mut pending: Vec<usize> = active_layer_ids.iter().map(|&id| id as usize).collect();
-        let mut seen_composites: HashSet<usize> = HashSet::new();
-        while let Some(idx) = pending.pop() {
-            if let Some(composite) = self.composites.get(idx).and_then(Option::as_ref) {
-                if !seen_composites.insert(idx) {
-                    continue;
-                }
-                pending.extend(composite.sources.iter().map(|source| source.layer_id()));
-                pending.push(composite.outline_mask_id);
-                continue;
-            }
-            if let Some(layer) = self.layers.get(idx).and_then(Option::as_ref) {
-                if first_format.is_none() {
-                    first_format = Self::msaa_internal_format(layer.fbo.color_format);
-                }
-                needs_stencil |= layer.has_path_regions;
-            }
+        for &id in active_layer_ids {
+            self.visit_mask_needs(id as usize, 0, &mut first_format, &mut needs_stencil);
         }
         (first_format, needs_stencil)
+    }
+
+    fn visit_mask_needs(
+        &self,
+        idx: usize,
+        depth: usize,
+        first_format: &mut Option<u32>,
+        needs_stencil: &mut bool,
+    ) {
+        // Composites nest through their sources; the depth guard only
+        // bounds a malformed cycle, which composite creation already rejects.
+        const MAX_COMPOSITE_NESTING: usize = 16;
+        if let Some(composite) = self.composites.get(idx).and_then(Option::as_ref) {
+            if depth >= MAX_COMPOSITE_NESTING {
+                return;
+            }
+            for source in &composite.sources {
+                self.visit_mask_needs(source.layer_id(), depth + 1, first_format, needs_stencil);
+            }
+            self.visit_mask_needs(
+                composite.outline_mask_id,
+                depth + 1,
+                first_format,
+                needs_stencil,
+            );
+            return;
+        }
+        if let Some(layer) = self.layers.get(idx).and_then(Option::as_ref) {
+            if first_format.is_none() {
+                *first_format = Self::msaa_internal_format(layer.fbo.color_format);
+            }
+            *needs_stencil |= layer.has_path_regions;
+        }
     }
 
     pub fn anti_aliasing_diagnostics(&self) -> AntiAliasingDiagnostics {

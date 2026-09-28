@@ -1606,7 +1606,13 @@ function preflightStreamCompositeFailures(
           );
           break;
         } catch (error) {
-          if (!canReduceStreamTileWidth(streamState.tileWidth)) throw error;
+          // Smaller tiles help a render target that is too large, not a
+          // renderer whose anti-aliasing mode changed mid-export: a fresh
+          // processor could finish the remaining bands in the other mode and
+          // the PNG would mix them, so that error ends the export.
+          if (isAntiAliasingModeChangeError(error) || !canReduceStreamTileWidth(streamState.tileWidth)) {
+            throw error;
+          }
           const nextTileWidth = reduceStreamTileWidth(streamState.tileWidth);
           disposeStreamRenderState(renderer, streamState, true);
           streamState = createStreamRenderStateWithFallback(
@@ -3365,6 +3371,16 @@ function getStreamTileWidth(width, maxDimension = Number.POSITIVE_INFINITY) {
     throw new Error("PNG export tile width is outside this renderer's limits.");
   }
   return Math.max(1, Math.floor(tileWidth));
+}
+
+/**
+ * The renderer refuses to finish a tile when its anti-aliasing mode changed
+ * during a tiled render, so a finished export never mixes multisampled and
+ * point-sampled tiles. This is the only tile error that must not be retried.
+ */
+function isAntiAliasingModeChangeError(error) {
+  const message = typeof error === "string" ? error : String(error?.message ?? "");
+  return message.includes("Anti-aliasing became unavailable during a tiled render");
 }
 
 function canReduceStreamTileWidth(tileWidth) {
