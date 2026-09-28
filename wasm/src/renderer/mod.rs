@@ -4860,8 +4860,8 @@ impl Renderer {
 
     fn mark_all_layers_dirty(&mut self) {
         // Dropping every cached mask is what a multisampling fallback asks
-        // for, so a pending fallback is satisfied here (also when the caller
-        // is a resize, an option change or a context restore).
+        // for, so a pending fallback is satisfied here whichever caller
+        // (a batch, an option change) runs the invalidation.
         self.msaa_fell_back = false;
         self.composite_errors.clear();
         for layer in self.layers.iter_mut().flatten() {

@@ -1524,7 +1524,14 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
               ) {
                 throw error;
               }
-              if (!canReduceStreamTileWidth(streamState.tileWidth)) {
+              // A smaller tile helps a render target that is too large, not a
+              // renderer whose anti-aliasing mode changed mid-export: a fresh
+              // processor could finish the remaining bands in the other mode
+              // and the PNG would mix them, so that error ends the export.
+              if (
+                isAntiAliasingModeChangeError(error) ||
+                !canReduceStreamTileWidth(streamState.tileWidth)
+              ) {
                 throw error;
               }
               const nextTileWidth = reduceStreamTileWidth(streamState.tileWidth);
