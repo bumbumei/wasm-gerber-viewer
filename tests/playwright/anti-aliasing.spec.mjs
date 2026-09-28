@@ -60,6 +60,10 @@ async function ink(page) {
 
 test("anti-aliasing is off by default and adds edge coverage when enabled", async ({ page }) => {
   await page.goto("/");
+  // The viewer attaches its file-input listener after the WASM module has
+  // loaded, and checks the option radios once it has; on a busy machine an
+  // upload before that is lost. The default also has to be Off.
+  await expect(page.locator("#anti-aliasing-off")).toBeChecked({ timeout: 60_000 });
   await page.locator("#file-input").setInputFiles({
     name: "anti-aliasing.gbr",
     mimeType: "text/plain",
