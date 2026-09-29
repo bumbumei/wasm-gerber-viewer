@@ -186,6 +186,13 @@ pub struct Renderer {
     /// masks already drawn multisampled are invalidated and redrawn
     /// point-sampled before anything is composited.
     msaa_fell_back: bool,
+    /// True while a layer mask is drawn into the multisample target with
+    /// per-sample coverage: the shaders compute analytic edge alpha,
+    /// SAMPLE_ALPHA_TO_COVERAGE turns it into a sample mask, and the blend
+    /// writes one (dark) or zero (clear) to the covered samples. False for
+    /// the option-off path, the RGBA8 fallback mask (multisampled edges only)
+    /// and the direct fallback, which all render exactly as the option off.
+    mask_pass_analytic_edges: bool,
     layers: Vec<Option<LayerMetadata>>, // Sparse vec (None = deallocated slot)
     composites: Vec<Option<CompositeLayerMetadata>>,
     internal_layer_ids: HashSet<usize>,
@@ -1252,6 +1259,7 @@ impl Renderer {
             msaa_failed_size: None,
             msaa_unexpected_error: None,
             msaa_fell_back: false,
+            mask_pass_analytic_edges: false,
             layers: Vec::new(),
             composites: Vec::new(),
             internal_layer_ids: HashSet::new(),
@@ -4108,8 +4116,8 @@ impl Renderer {
     ) {
         // Only the anti-aliased edges read the view scale, so it is computed
         // here once per draw instead of per vertex, and not at all when the
-        // option is off.
-        if self.anti_aliasing {
+        // pass is point-sampled.
+        if self.mask_pass_analytic_edges {
             if let Some(loc) = program.uniforms.get("pixels_per_world") {
                 self.gl.uniform1f(
                     Some(loc),
@@ -4128,8 +4136,14 @@ impl Renderer {
             self.gl.uniform1f(Some(loc), self.minimum_feature_pixels);
         }
         if let Some(loc) = program.uniforms.get("anti_aliasing") {
-            self.gl
-                .uniform1f(Some(loc), if self.anti_aliasing { 1.0 } else { 0.0 });
+            self.gl.uniform1f(
+                Some(loc),
+                if self.mask_pass_analytic_edges {
+                    1.0
+                } else {
+                    0.0
+                },
+            );
         }
         if let Some(loc) = program.uniforms.get("inner_outline_pixels") {
             self.gl.uniform1f(Some(loc), inner_outline_pixels);
@@ -7745,108 +7759,124 @@ impl Renderer {
         }
 
         let white_color = [1.0, 1.0, 1.0, 1.0];
-        // Anti-aliased clear sublayers draw with zero: the anti-aliasing
-        // shaders then write 1 - coverage, every other shader writes 0, and
-        // the MIN blend keeps the smaller of that and the mask.
-        let clear_color = [0.0, 0.0, 0.0, 0.0];
+        // With per-sample coverage the fragment alpha selects the samples and
+        // the colour is the value they take: black for a clear sublayer. Its
+        // alpha of one keeps the hard-edged shaders fully covered.
+        let clear_color = [0.0, 0.0, 0.0, 1.0];
+        let analytic_edges = self.mask_pass_analytic_edges;
 
         // Get sublayer count
         let sublayer_count = self.get_layer(layer_id)?.gerber_data.len();
 
-        // Render each polarity sublayer with appropriate blending
-        for sublayer_idx in 0..sublayer_count {
-            let is_negative = self.get_layer(layer_id)?.gerber_data[sublayer_idx].is_negative;
-            let mask_in_red = self.get_layer(layer_id)?.mask_in_red;
-
-            // Set polarity blending mode. Positive coverage combines as a
-            // union (MAX): a pixel is as covered as the most covering piece on
-            // it, so overlapping anti-aliased edges never add up past full
-            // coverage. With anti-aliasing off coverage is 0 or 1 and MAX
-            // gives the same mask as the previous clamped addition.
-            //
-            // Clear coverage with anti-aliasing is the matching difference
-            // (MIN with 1 - coverage), so drawing the same clear shape twice
-            // leaves the mask as drawing it once; the previous multiplicative
-            // erase would take a half-covered edge from 1 to 0.5 to 0.25.
-            // Without anti-aliasing coverage is 0 or 1, where both agree, so
-            // the Off path keeps the multiplicative erase unchanged. Every
-            // branch sets both blend equations.
-            let clear_with_coverage = is_negative && self.anti_aliasing;
-            let mask_color = if clear_with_coverage {
-                &clear_color
-            } else {
-                &white_color
-            };
-            self.gl.enable(BLEND);
-            if clear_with_coverage && mask_in_red {
-                self.gl.blend_func(ONE, ONE);
-                self.gl.blend_equation(WebGl2RenderingContext::MIN);
-            } else if clear_with_coverage {
-                // Colour untouched, alpha (the coverage) takes the minimum.
-                self.gl.blend_func_separate(ZERO, ONE, ONE, ONE);
-                self.gl
-                    .blend_equation_separate(FUNC_ADD, WebGl2RenderingContext::MIN);
-            } else if mask_in_red && is_negative {
-                // R8 masks accumulate polarity in red rather than alpha.
-                // Clear coverage erases destination red.
-                self.gl.blend_func(ZERO, ONE_MINUS_SRC_ALPHA);
-                self.gl.blend_equation(FUNC_ADD);
-            } else if mask_in_red {
-                self.gl.blend_func(ONE, ONE);
-                self.gl.blend_equation(WebGl2RenderingContext::MAX);
-            } else if is_negative {
-                // Negative polarity: erase alpha
-                self.gl
-                    .blend_func_separate(ZERO, ONE, ZERO, ONE_MINUS_SRC_ALPHA);
-                self.gl.blend_equation(FUNC_ADD);
-            } else {
-                // Positive polarity: colour untouched, alpha is the coverage
-                self.gl.blend_func_separate(ZERO, ONE, ONE, ONE);
-                self.gl
-                    .blend_equation_separate(FUNC_ADD, WebGl2RenderingContext::MAX);
-            }
-
-            // Render all shapes (empty checks done inside draw methods)
-            self.draw_instanced_triangles(
-                transform,
-                mask_color,
-                layer_id,
-                sublayer_idx,
-                viewport_width,
-                viewport_height,
-            )?;
-            self.draw_instanced_triangle_templates(transform, mask_color, layer_id, sublayer_idx)?;
-            self.draw_instanced_lines(
-                transform,
-                mask_color,
-                layer_id,
-                sublayer_idx,
-                viewport_width,
-                viewport_height,
-            )?;
-            self.draw_instanced_circles(
-                transform,
-                mask_color,
-                layer_id,
-                sublayer_idx,
-                viewport_width,
-                viewport_height,
-            )?;
-            self.draw_instanced_arcs(
-                transform,
-                mask_color,
-                layer_id,
-                sublayer_idx,
-                viewport_width,
-                viewport_height,
-            )?;
-            self.draw_instanced_thermals(transform, mask_color, layer_id, sublayer_idx)?;
-            self.draw_path_regions(transform, mask_color, layer_id, sublayer_idx)?;
+        if analytic_edges {
+            self.gl
+                .enable(WebGl2RenderingContext::SAMPLE_ALPHA_TO_COVERAGE);
         }
+        let result = (|| {
+            // Render each polarity sublayer with appropriate blending
+            for sublayer_idx in 0..sublayer_count {
+                let is_negative = self.get_layer(layer_id)?.gerber_data[sublayer_idx].is_negative;
+                let mask_in_red = self.get_layer(layer_id)?.mask_in_red;
+
+                // Set polarity blending mode.
+                //
+                // With per-sample coverage every sample is written as one or
+                // zero, exactly as the option-off path writes pixels, so a
+                // shape drawn dark and then clear cancels, a clear drawn twice
+                // is a clear drawn once, and sublayer order is kept; the
+                // resolve averages the samples into the edge coverage.
+                //
+                // Without it, positive coverage combines as a union (MAX): a
+                // pixel is as covered as the most covering piece on it, which
+                // with coverage of 0 or 1 gives the same mask as the previous
+                // clamped addition. Negative polarity keeps the multiplicative
+                // erase. Every branch sets both blend equations.
+                let mask_color = if analytic_edges && is_negative {
+                    &clear_color
+                } else {
+                    &white_color
+                };
+                self.gl.enable(BLEND);
+                if analytic_edges && is_negative {
+                    // Covered samples become zero whatever they held.
+                    self.gl.blend_func(ZERO, ZERO);
+                    self.gl.blend_equation(FUNC_ADD);
+                } else if analytic_edges {
+                    // Covered samples become one (the mask is R8, in red).
+                    self.gl.blend_func(ONE, ONE);
+                    self.gl.blend_equation(WebGl2RenderingContext::MAX);
+                } else if mask_in_red && is_negative {
+                    // R8 masks accumulate polarity in red rather than alpha.
+                    // Clear coverage erases destination red.
+                    self.gl.blend_func(ZERO, ONE_MINUS_SRC_ALPHA);
+                    self.gl.blend_equation(FUNC_ADD);
+                } else if mask_in_red {
+                    self.gl.blend_func(ONE, ONE);
+                    self.gl.blend_equation(WebGl2RenderingContext::MAX);
+                } else if is_negative {
+                    // Negative polarity: erase alpha
+                    self.gl
+                        .blend_func_separate(ZERO, ONE, ZERO, ONE_MINUS_SRC_ALPHA);
+                    self.gl.blend_equation(FUNC_ADD);
+                } else {
+                    // Positive polarity: colour untouched, alpha is the coverage
+                    self.gl.blend_func_separate(ZERO, ONE, ONE, ONE);
+                    self.gl
+                        .blend_equation_separate(FUNC_ADD, WebGl2RenderingContext::MAX);
+                }
+
+                // Render all shapes (empty checks done inside draw methods)
+                self.draw_instanced_triangles(
+                    transform,
+                    mask_color,
+                    layer_id,
+                    sublayer_idx,
+                    viewport_width,
+                    viewport_height,
+                )?;
+                self.draw_instanced_triangle_templates(
+                    transform,
+                    mask_color,
+                    layer_id,
+                    sublayer_idx,
+                )?;
+                self.draw_instanced_lines(
+                    transform,
+                    mask_color,
+                    layer_id,
+                    sublayer_idx,
+                    viewport_width,
+                    viewport_height,
+                )?;
+                self.draw_instanced_circles(
+                    transform,
+                    mask_color,
+                    layer_id,
+                    sublayer_idx,
+                    viewport_width,
+                    viewport_height,
+                )?;
+                self.draw_instanced_arcs(
+                    transform,
+                    mask_color,
+                    layer_id,
+                    sublayer_idx,
+                    viewport_width,
+                    viewport_height,
+                )?;
+                self.draw_instanced_thermals(transform, mask_color, layer_id, sublayer_idx)?;
+                self.draw_path_regions(transform, mask_color, layer_id, sublayer_idx)?;
+            }
+            Ok(())
+        })();
 
         self.gl.blend_equation(FUNC_ADD);
         self.gl.disable(BLEND);
-        Ok(())
+        if analytic_edges {
+            self.gl
+                .disable(WebGl2RenderingContext::SAMPLE_ALPHA_TO_COVERAGE);
+        }
+        result
     }
 
     /// Set active layers and colors (stores state for FBO reuse)
@@ -9419,7 +9449,17 @@ impl Renderer {
             ));
         }
         if let Some(msaa_framebuffer) = &msaa_framebuffer {
-            self.render_layer_mask_into(layer_idx, msaa_framebuffer, &transform, width, height)?;
+            // Per-sample coverage needs the mask in red (R8); an RGBA8 fallback
+            // mask keeps its coverage in alpha, which alpha-to-coverage would
+            // consume, so it gets multisampled edges only.
+            self.render_layer_mask_into(
+                layer_idx,
+                msaa_framebuffer,
+                &transform,
+                width,
+                height,
+                color_format == "R8",
+            )?;
             // A geometry draw error is a rendering error like before, not a
             // reason to give up multisampling.
             Self::check_gl_stage(&self.gl, "Gerber mask rendering")?;
@@ -9451,10 +9491,18 @@ impl Renderer {
                 // redraws the masks already multisampled in this batch.
                 Self::drain_gl_errors(&self.gl);
                 self.disable_msaa();
-                self.render_layer_mask_into(layer_idx, &framebuffer, &transform, width, height)?;
+                self.render_layer_mask_into(
+                    layer_idx,
+                    &framebuffer,
+                    &transform,
+                    width,
+                    height,
+                    false,
+                )?;
             }
         } else {
-            self.render_layer_mask_into(layer_idx, &framebuffer, &transform, width, height)?;
+            // Point-sampled, exactly as with the option off.
+            self.render_layer_mask_into(layer_idx, &framebuffer, &transform, width, height, false)?;
         }
         Self::check_gl_stage(&self.gl, "Gerber mask rendering")?;
 
@@ -9466,6 +9514,9 @@ impl Renderer {
         Ok(true)
     }
 
+    /// Draws one layer's mask into `framebuffer`, with per-sample analytic
+    /// edge coverage when `analytic_edges` is set (a multisample R8 target)
+    /// and exactly as with the option off otherwise.
     fn render_layer_mask_into(
         &mut self,
         layer_idx: usize,
@@ -9473,6 +9524,7 @@ impl Renderer {
         transform: &[f32; 9],
         width: u32,
         height: u32,
+        analytic_edges: bool,
     ) -> Result<(), JsValue> {
         let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
         let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
@@ -9480,7 +9532,10 @@ impl Renderer {
         self.gl.viewport(0, 0, width_i32, height_i32);
         self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
         self.gl.clear(COLOR_BUFFER_BIT);
-        self.render_layer_geometry(layer_idx, transform, width, height)
+        self.mask_pass_analytic_edges = analytic_edges;
+        let result = self.render_layer_geometry(layer_idx, transform, width, height);
+        self.mask_pass_analytic_edges = false;
+        result
     }
 
     /// Multisampled renderbuffer format matching a layer mask texture, or

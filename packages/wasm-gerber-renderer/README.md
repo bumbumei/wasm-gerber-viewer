@@ -450,7 +450,7 @@ other valid layers/composites continue.
 - `invertedOutline`: Node-only outline source for inverted layers. Use `"auto"` to detect a board outline layer, `"bounds"` to fill the current Gerber bounds, or a layer index/name selector. Defaults to `"auto"`.
 - `maxBandBytes`: Node-only streamed PNG row-buffer budget. Defaults to `512 MiB`.
 - `maxFullFrameBytes`: Node-only memory budget for choosing full-frame PNG export. Defaults to `512 MiB`.
-- `maxRenderTargetBytes`: Node-only per-render-target memory cap. By default the renderer probes the available GPU/driver budget and falls back to `2 GiB`.
+- `maxRenderTargetBytes`: Node-only per-render-target memory cap. By default the renderer probes the available GPU/driver budget and falls back to `2 GiB`. With `antiAliasing` the shared 4x multisample target (R8 colour plus stencil, 8 bytes per pixel) is included in the estimate.
 - `framebufferMemorySafetyFactor`: Node-only multiplier for full-frame framebuffer memory estimates. Defaults to `2`.
 - `strategy`: Node-only PNG export strategy, `"auto"`, `"full-frame"`, or `"stream"`. Defaults to `"auto"`.
 - `layerErrorMode`: `"skip"` renders remaining valid layers; `"throw"` rejects on first failure. Defaults to `"skip"`.

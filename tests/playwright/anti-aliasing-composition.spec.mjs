@@ -29,6 +29,9 @@ const CASES = {
   // Dark square, clear 6.1 mm pad, dark 3.3 mm pad on top: the centre must
   // be dark again, the ring between the two pads clear.
   darkClearDark: gerber(...darkSquare, "%LPC*%", "D11*", `${point(5, 5)}D03*`, "%LPD*%", "D10*", `${point(5, 5)}D03*`),
+  // The same pad flashed dark and then clear at the same place: nothing may
+  // remain, not even at the anti-aliased edge.
+  darkThenClearSame: gerber("D10*", `${point(5, 5)}D03*`, "%LPC*%", `${point(5, 5)}D03*`),
 };
 
 // Full-circle arcs of radius 2 mm around (5, 5): a 4 mm stroke is exactly as
@@ -79,10 +82,15 @@ async function renderCases(page, antiAliasing) {
           return pixels[(y * size + x) * 4 + 3];
         };
         let partial = 0;
-        for (let i = 3; i < pixels.length; i += 4) if (pixels[i] > 0 && pixels[i] < 255) partial++;
+        let lit = 0;
+        for (let i = 3; i < pixels.length; i += 4) {
+          if (pixels[i] > 0) lit++;
+          if (pixels[i] > 0 && pixels[i] < 255) partial++;
+        }
         out[name] = {
           pixels: Array.from(pixels),
           partial,
+          lit,
           centre: at(5, 5),
           ring: at(5 + 2.3, 5),
           corner: at(0.6, 0.6),
@@ -109,6 +117,14 @@ test("an anti-aliased clear shape erases the same coverage however often it is d
   expect(result.clearOnce.partial).toBeGreaterThan(20);
   expect(differingPixels(result.clearOnce.pixels, result.clearTwiceSameSublayer.pixels)).toBe(0);
   expect(differingPixels(result.clearOnce.pixels, result.clearTwiceSeparateSublayers.pixels)).toBe(0);
+});
+
+test("a shape flashed dark and then clear at the same place leaves nothing", async ({ page }) => {
+  await page.goto("/");
+  for (const antiAliasing of [false, true]) {
+    const { darkThenClearSame } = await renderCases(page, antiAliasing);
+    expect(darkThenClearSame.lit, `AA ${antiAliasing}`).toBe(0);
+  }
 });
 
 test("polarity order is kept: dark, clear, dark", async ({ page }) => {

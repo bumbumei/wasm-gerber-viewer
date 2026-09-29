@@ -1381,7 +1381,7 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
   const fullFrameRenderTargetEstimate = estimateRenderTargetBytes(
     width,
     height,
-    getFullFrameRenderTargetCount(layerCount),
+    getFullFrameRenderTargetCount(layerCount, plan.antiAliasing === true),
   );
   if (renderPlan.layers.length === 0 || !renderPlan.view) {
     const blankTileHeight = getBlankStreamTileHeight(
@@ -1702,6 +1702,7 @@ function createStreamRenderState(
     maxDimension,
     layerCount,
     pngChannels,
+    plan.antiAliasing === true,
   );
   const renderGl = renderer.createExportContext(tileWidth, tileHeight);
   let renderContext = null;
@@ -3357,12 +3358,27 @@ function estimateRenderTargetBytes(width, height, targetCount) {
   return width * height * RGBA_BYTES_PER_PIXEL * Math.max(1, targetCount);
 }
 
-function getFullFrameRenderTargetCount(layerCount) {
-  return Math.max(1, Math.floor(numberOrDefault(layerCount, 1))) + 2;
+// With anti-aliasing the renderer keeps one shared 4x multisample target:
+// R8 colour (4 bytes per pixel) plus STENCIL_INDEX8 (4 bytes per pixel),
+// the size of two RGBA render targets. The DEPTH24_STENCIL8 fallback and an
+// RGBA8 mask are larger and are not budgeted; they only occur when the
+// smaller formats are refused.
+const MSAA_RENDER_TARGET_EQUIVALENTS = 2;
+
+function getFullFrameRenderTargetCount(layerCount, antiAliasing = false) {
+  return (
+    Math.max(1, Math.floor(numberOrDefault(layerCount, 1))) +
+    2 +
+    (antiAliasing ? MSAA_RENDER_TARGET_EQUIVALENTS : 0)
+  );
 }
 
-function getStreamRenderTargetCount(layerCount) {
-  return Math.max(1, Math.floor(numberOrDefault(layerCount, 1))) + 1;
+function getStreamRenderTargetCount(layerCount, antiAliasing = false) {
+  return (
+    Math.max(1, Math.floor(numberOrDefault(layerCount, 1))) +
+    1 +
+    (antiAliasing ? MSAA_RENDER_TARGET_EQUIVALENTS : 0)
+  );
 }
 
 function assertRenderTargetBudget(estimatedBytes, maxRenderTargetBytes, width, height) {
@@ -3410,6 +3426,7 @@ function getStreamTileHeight(
   maxDimension = Number.POSITIVE_INFINITY,
   layerCount = 1,
   pngChannels = RGBA_BYTES_PER_PIXEL,
+  antiAliasing = false,
 ) {
   const rowStride = getPngRowStride(width, pngChannels);
   // These three CPU buffers coexist while an encoded band is awaiting the
@@ -3425,7 +3442,7 @@ function getStreamTileHeight(
       `PNG export rows exceed the ${formatByteCount(maxBandBytes)} stream band limit at ${width}px wide.`,
     );
   }
-  const targetCount = getStreamRenderTargetCount(layerCount);
+  const targetCount = getStreamRenderTargetCount(layerCount, antiAliasing);
   const byRenderTargetBytes = Math.floor(
     maxRenderTargetBytes / (tileWidth * RGBA_BYTES_PER_PIXEL * targetCount),
   );

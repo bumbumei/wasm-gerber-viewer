@@ -18,7 +18,9 @@ const A = [...header, "G36*", `${point(0.3, 0.2)}D02*`, `${point(3.7, 1.1)}D01*`
 const C = [...header, "G36*", `${point(0.4, 3.6)}D02*`, `${point(3.6, 3.4)}D01*`, `${point(2.2, 0.5)}D01*`, `${point(0.4, 3.6)}D01*`, "G37*", "M02*"].join("\n");
 // B: a round pad drawn as a G36 region with two arcs (needs the stencil).
 const B = [...header, "G36*", `${point(3.0, 2.0)}D02*`, `G03${point(1.0, 2.0)}I${-1e6}J0D01*`, `${point(3.0, 2.0)}I${1e6}J0D01*`, "G37*", "M02*"].join("\n");
-const LAYERS = { A, B, C };
+// D: a round flash (disc shader with analytic edges).
+const D = ["%FSLAX46Y46*%", "%MOMM*%", "%ADD10C,2.6*%", "%LPD*%", "D10*", `${point(2, 2)}D03*`, "M02*"].join("\n");
+const LAYERS = { A, B, C, D };
 
 /**
  * Runs steps against a fresh processor on a proxied 96 x 96 context.
@@ -160,6 +162,8 @@ async function run(page, { layers, steps, inject = {}, size = 96 }) {
             processor.render_tile(list, colours(list.length), exportSize, exportSize, tileX, tileY, size, size, ...views.T, 1);
           } else if (step.restoreContext) {
             lost = false;
+          } else if (step.antiAliasing !== undefined) {
+            processor.set_anti_aliasing(step.antiAliasing);
           }
         } catch (caught) {
           error = String(caught?.message ?? caught);
@@ -307,6 +311,32 @@ test("a composite is rebuilt from point-sampled sources in the same call", async
   expect(r.composite.status).toBe("size-limited");
   expect(r.composite.partial).toBe(0);
   expect(same(r.composite, r.again)).toBe(true);
+});
+
+test("the direct fallback renders exactly as the option off", async ({ page }) => {
+  // A disc has analytic edges with anti-aliasing; once multisampling is
+  // unavailable the same disc must come out point-sampled, pixel for pixel
+  // like the option off, not with fractional edges composited directly.
+  const r = await run(page, {
+    layers: ["D", "A"],
+    inject: { blitError: { index: 1, error: GL.INVALID_OPERATION } },
+    steps: [
+      { render: ["D", "A"] },
+      { snapshot: "fallback" },
+      { antiAliasing: false },
+      { render: ["D", "A"] },
+      { snapshot: "off" },
+      { antiAliasing: true },
+      { render: ["D", "A"] },
+      { snapshot: "onAgain" },
+    ],
+  });
+  expect(r.fallback.status).toBe("unsupported");
+  expect(r.fallback.partial).toBe(0);
+  expect(same(r.fallback, r.off)).toBe(true);
+  // Turning the option back on retries nothing on an unsupported context.
+  expect(r.onAgain.status).toBe("unsupported");
+  expect(same(r.onAgain, r.off)).toBe(true);
 });
 
 test("a lost context is an error, not a fallback, and retries after restore", async ({ page }) => {

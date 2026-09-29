@@ -81,9 +81,10 @@ test("anti-aliasing is off by default and adds edge coverage when enabled", asyn
   const inkOn = await ink(page);
 
   // Point sampling lights whole pixels; anti-aliasing adds partially covered
-  // edge pixels around every pad, track and region, so more pixels differ
-  // from the background and many of them are in between.
-  expect(inkOn.count).toBeGreaterThan(inkOff.count * 1.1);
+  // edge pixels around every pad, track and region. Every pixel lit by point
+  // sampling is at least half covered and stays lit, edge pixels covered by
+  // a quarter or more join, and many of them are in between.
+  expect(inkOn.count).toBeGreaterThan(inkOff.count);
   expect(inkOn.partial).toBeGreaterThan(inkOff.partial + 200);
 
   // Switching back gives the point-sampled picture again.

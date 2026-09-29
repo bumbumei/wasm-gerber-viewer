@@ -25,7 +25,8 @@ void main() {
         alpha *= clamp((dist - vInnerRadius) / vEdgeWidth + 0.5, 0.0, 1.0);
     }
     if (alpha <= 0.0) discard;
-    // Dark sublayers pass white and write the coverage; clear sublayers
-    // pass zero and write 1 - coverage, which the MIN blend keeps.
-    fragColor = mix(vec4(1.0) - color, color, alpha);
+    // Per-sample coverage: this pass runs with SAMPLE_ALPHA_TO_COVERAGE, so
+    // alpha selects the samples and the colour is the value they take, white
+    // for a dark sublayer and black for a clear one.
+    fragColor = vec4(color.rgb, alpha);
 }
