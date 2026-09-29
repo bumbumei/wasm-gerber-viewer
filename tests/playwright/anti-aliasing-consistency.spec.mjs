@@ -22,7 +22,7 @@ const LAYERS = { A, B, C };
 
 /**
  * Runs steps against a fresh processor on a proxied 96 x 96 context.
- * inject: { storage: {format, error}, blitError: {index, error},
+ * inject: { storage: {format, error, occurrence?}, blitError: {index, error},
  *           r8TextureFails: n (the n-th R8 texImage2D reports INVALID_ENUM),
  *           loseAfterStorage: format }. Each fires once.
  * Steps: {addLayer: name}, {render: [names], view?: "T"|"U"}, {snapshot: key},
@@ -44,6 +44,7 @@ async function run(page, { layers, steps, inject = {}, size = 96 }) {
       let lost = false;
       const once = { storage: inject.storage, blit: inject.blitError, lose: inject.loseAfterStorage };
       let r8Countdown = inject.r8TextureFails ?? 0;
+      const storageCalls = new Map();
       const gl = new Proxy(raw, {
         get(target, property) {
           const value = Reflect.get(target, property, target);
@@ -51,8 +52,13 @@ async function run(page, { layers, steps, inject = {}, size = 96 }) {
             return (...args) => {
               const format = args[2];
               log.storage.push(format);
+              storageCalls.set(format, (storageCalls.get(format) ?? 0) + 1);
               const result = value.apply(target, args);
-              if (once.storage && once.storage.format === format) {
+              if (
+                once.storage &&
+                once.storage.format === format &&
+                storageCalls.get(format) === (once.storage.occurrence ?? 1)
+              ) {
                 pendingError = once.storage.error;
                 once.storage = null;
               }
@@ -361,4 +367,54 @@ test("tiles: a resolve failure after the first tile fails the tile instead of mi
   // A later call at the same tile succeeds point-sampled.
   expect(r.tile2again.error).toBeNull();
   expect(r.tile2again.partial).toBe(0);
+});
+
+test("tiles: a target re-creation failure before a later tile fails that tile instead of mixing modes", async ({ page }) => {
+  // A has an R8 mask; C's R8 allocation is refused so its mask is RGBA8. The
+  // first tile draws A then C multisampled and leaves the shared target in
+  // RGBA8. The second tile's preflight re-creates the R8 target (the second
+  // R8 allocation overall) and that fails: the tile must not come out
+  // point-sampled next to the multisampled first tile.
+  const r = await run(page, {
+    layers: ["A"],
+    inject: { r8TextureFails: 2, storage: { format: GL.R8, error: GL.OUT_OF_MEMORY, occurrence: 2 } },
+    steps: [
+      { addLayer: "C" },
+      { tile: { names: ["A", "C"], exportSize: 192, tileX: 0, tileY: 0 } },
+      { snapshot: "tile1" },
+      { tile: { names: ["A", "C"], exportSize: 192, tileX: 96, tileY: 0 }, expectError: true },
+      { snapshot: "tile2" },
+      { tile: { names: ["A", "C"], exportSize: 192, tileX: 96, tileY: 0 } },
+      { snapshot: "tile2again" },
+    ],
+  });
+  expect(r.tile1.error).toBeNull();
+  expect(r.tile1.status).toBe("ready");
+  expect(r.tile1.partial).toBeGreaterThan(20);
+  expect(r.tile1.storage).toEqual([GL.R8, GL.RGBA8]);
+  expect(r.tile2.error).toContain("tiled render");
+  expect(r.tile2.status).toBe("size-limited");
+  // A later call at the same tile succeeds point-sampled.
+  expect(r.tile2again.error).toBeNull();
+  expect(r.tile2again.partial).toBe(0);
+});
+
+test("tiles: a failure before the first tile of a fresh renderer falls back without an error", async ({ page }) => {
+  // No multisampled tile exists yet, so a failure in the first call may fall
+  // back silently: every tile of the export is point-sampled.
+  const r = await run(page, {
+    layers: ["A", "C"],
+    inject: { blitError: { index: 1, error: GL.INVALID_OPERATION } },
+    steps: [
+      { tile: { names: ["A", "C"], exportSize: 192, tileX: 0, tileY: 0 } },
+      { snapshot: "tile1" },
+      { tile: { names: ["A", "C"], exportSize: 192, tileX: 96, tileY: 0 } },
+      { snapshot: "tile2" },
+    ],
+  });
+  expect(r.tile1.error).toBeNull();
+  expect(r.tile1.status).toBe("unsupported");
+  expect(r.tile1.partial).toBe(0);
+  expect(r.tile2.error).toBeNull();
+  expect(r.tile2.partial).toBe(0);
 });

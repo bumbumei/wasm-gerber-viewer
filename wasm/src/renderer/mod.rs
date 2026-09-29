@@ -157,6 +157,11 @@ pub struct AntiAliasingDiagnostics {
     pub unexpected_error: Option<u32>,
 }
 
+/// Returned by a `render_tile*` call that would otherwise produce a tile in
+/// a different anti-aliasing mode from the tiles before it.
+const MSAA_TILE_MODE_CHANGED: &str = "Anti-aliasing became unavailable during a tiled render; the tile was \
+     not produced so the export does not mix anti-aliased and point-sampled tiles. Retry the export.";
+
 /// Samples per pixel for the layer masks. Triangle edges (regions, macro
 /// flashes, path regions) are anti-aliased by the multisampling; discs and
 /// line bodies compute their edge coverage analytically in the fragment
@@ -9193,9 +9198,20 @@ impl Renderer {
             }
         }
 
+        // A tile of an export must match the tiles already produced. Those
+        // were multisampled exactly when a multisample target was in use
+        // going into this call (the target only goes away with a resize, the
+        // option, clear() or a context change, none of which happen between
+        // tiles), so in that case any loss of multisampling during this call
+        // is an error rather than a point-sampled tile. With no target in use
+        // no multisampled tile exists yet and the call may fall back.
+        let must_stay_multisampled = mode == MaskRenderMode::Tile && self.msaa_target.is_some();
+
         // Decide whether this batch multisamples before any mask is drawn, so
         // an allocation failure never leaves the batch half multisampled.
-        self.preflight_msaa(active_layer_ids, width, height);
+        if self.preflight_msaa(active_layer_ids, width, height) && must_stay_multisampled {
+            return Err(JsValue::from_str(MSAA_TILE_MODE_CHANGED));
+        }
         self.render_active_masks(
             active_layer_ids,
             transform,
@@ -9209,27 +9225,19 @@ impl Renderer {
             // failed): the masks drawn so far in this batch are
             // multisampled and the rest are not. Drop them all.
             self.mark_all_layers_dirty();
-            match mode {
-                MaskRenderMode::Frame => {
-                    // Point-sampled from here on, so one more pass gives a
-                    // consistent frame.
-                    self.render_active_masks(
-                        active_layer_ids,
-                        transform,
-                        width,
-                        height,
-                        width_i32,
-                        height_i32,
-                    )?;
-                }
-                MaskRenderMode::Tile => {
-                    return Err(JsValue::from_str(
-                        "Anti-aliasing became unavailable during a tiled render; the tile was \
-                         not produced so the export does not mix anti-aliased and point-sampled \
-                         tiles. Retry the export.",
-                    ));
-                }
+            if must_stay_multisampled {
+                return Err(JsValue::from_str(MSAA_TILE_MODE_CHANGED));
             }
+            // Point-sampled from here on, so one more pass gives a
+            // consistent batch.
+            self.render_active_masks(
+                active_layer_ids,
+                transform,
+                width,
+                height,
+                width_i32,
+                height_i32,
+            )?;
         }
 
         Ok(())
@@ -9287,17 +9295,20 @@ impl Renderer {
     /// of a batch is drawn. Nothing is allocated when the current target
     /// already fits. If the allocation fails, or a fallback from an earlier
     /// batch is still pending, every cached mask is dropped so the batch is
-    /// point-sampled from the start. Costs one bool read with the option off.
-    fn preflight_msaa(&mut self, active_layer_ids: &[u32], width: u32, height: u32) {
+    /// point-sampled from the start, and `true` is returned so the caller
+    /// knows the mode changed. Costs one bool read with the option off.
+    fn preflight_msaa(&mut self, active_layer_ids: &[u32], width: u32, height: u32) -> bool {
         if self.anti_aliasing {
             let (first_format, needs_stencil) = self.frame_mask_needs(active_layer_ids);
             if let Some(format) = first_format {
                 let _ = self.ensure_msaa_target(width, height, format, needs_stencil);
             }
         }
-        if self.msaa_fell_back {
+        let fell_back = self.msaa_fell_back;
+        if fell_back {
             self.mark_all_layers_dirty();
         }
+        fell_back
     }
 
     /// The multisample format of the first mask this batch will draw and
