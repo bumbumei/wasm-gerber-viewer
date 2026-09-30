@@ -1866,18 +1866,15 @@ const ANTI_ALIASING_MODE_CHANGED_MESSAGE =
   "Anti-aliasing mode changed during a tiled render; the export was stopped so the PNG does not mix anti-aliased and point-sampled bands.";
 
 /**
- * The anti-aliasing mode a processor's frames come out in: "point-sampled"
- * (option off, or multisampling unavailable), or "multisampled" qualified by
- * the number of layers whose mask fell back to RGBA8 and are drawn
- * point-sampled regardless, since a replacement processor could allocate
- * those masks differently. Null for a WASM build without the diagnostics.
+ * The mode the processor drew its last masks in, uniform across a frame:
+ * "multisampled" or "point-sampled" (option off, multisampling unavailable,
+ * or a layer whose mask cannot multisample). Null for a WASM build without
+ * the diagnostics.
  */
 function streamAntiAliasingMode(processor) {
   if (typeof processor?.get_anti_aliasing_diagnostics !== "function") return null;
   const diagnostics = processor.get_anti_aliasing_diagnostics();
-  return diagnostics.status === "ready"
-    ? `multisampled:${diagnostics.rgba8Masks ?? 0}`
-    : "point-sampled";
+  return diagnostics.mode ?? (diagnostics.status === "ready" ? "multisampled" : "point-sampled");
 }
 
 /**

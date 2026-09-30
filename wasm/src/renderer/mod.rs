@@ -156,16 +156,23 @@ pub struct AntiAliasingDiagnostics {
     pub stencil_allocated: bool,
     pub failed_size: Option<(u32, u32)>,
     pub unexpected_error: Option<u32>,
-    /// Layers whose mask fell back to RGBA8 and therefore render
-    /// point-sampled whatever the option: part of what decides a frame's
-    /// look, so an exporter can pin it alongside the status.
-    pub rgba8_masks: usize,
+    /// "multisampled" or "point-sampled": the mode the masks were last drawn
+    /// in, which an exporter pins so every band of a PNG comes out alike.
+    pub mode: &'static str,
 }
 
 /// Returned by a `render_tile*` call that would otherwise produce a tile in
 /// a different anti-aliasing mode from the tiles before it.
 const MSAA_TILE_MODE_CHANGED: &str = "Anti-aliasing became unavailable during a tiled render; the tile was \
      not produced so the export does not mix anti-aliased and point-sampled tiles. Retry the export.";
+
+/// What the masks of one batch need from the multisample target.
+#[derive(Default)]
+struct MaskNeeds {
+    r8: bool,
+    other: bool,
+    stencil: bool,
+}
 
 /// Samples per pixel for the layer masks. Triangle edges (regions, macro
 /// flashes, path regions) are anti-aliased by the multisampling; discs and
@@ -191,6 +198,14 @@ pub struct Renderer {
     /// masks already drawn multisampled are invalidated and redrawn
     /// point-sampled before anything is composited.
     msaa_fell_back: bool,
+    /// Mode of the masks cached since the last invalidation: true when they
+    /// were drawn through the multisample target. A batch is multisampled
+    /// only when the option is on, every mask it draws is R8 and the target
+    /// is available; otherwise the whole batch is point-sampled, so one
+    /// frame, and one tiled export, never mixes the two. Decided before the
+    /// first mask of a batch by `preflight_msaa`, which invalidates the
+    /// caches when the mode changes.
+    batch_multisampled: bool,
     /// True while a layer mask is drawn into the multisample target with
     /// per-sample coverage: the shaders compute analytic edge alpha,
     /// SAMPLE_ALPHA_TO_COVERAGE turns it into a sample mask, and the blend
@@ -1264,6 +1279,7 @@ impl Renderer {
             msaa_failed_size: None,
             msaa_unexpected_error: None,
             msaa_fell_back: false,
+            batch_multisampled: false,
             mask_pass_analytic_edges: false,
             layers: Vec::new(),
             composites: Vec::new(),
@@ -8061,7 +8077,7 @@ impl Renderer {
         };
         let sources = &sources[..source_count];
         let outline_source = ResolvedMaskSource::new(outline_id, MaskSourceKind::InternalOutline);
-        self.with_consistent_masks(|renderer| {
+        self.with_consistent_masks(&[composite_id as u32], width, height, |renderer| {
             for source in sources.iter().copied() {
                 renderer.ensure_mask_source_rendered(
                     source, transform, width, height, width_i32, height_i32,
@@ -8331,7 +8347,7 @@ impl Renderer {
             return Ok(-1);
         }
         let transform = self.camera.get_transform_matrix(width, height);
-        self.with_consistent_masks(|renderer| {
+        self.with_consistent_masks(&[composite_id as u32], width, height, |renderer| {
             renderer.render_composite_fbo(composite_id, transform, width, height)
         })?;
         if !self.read_composite_output_active(composite_id, x, y)? {
@@ -8386,7 +8402,7 @@ impl Renderer {
         let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
         let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
         let transform = self.camera.get_transform_matrix(width, height);
-        self.with_consistent_masks(|renderer| {
+        self.with_consistent_masks(&[composite_id as u32], width, height, |renderer| {
             renderer.render_composite_fbo(composite_id, transform, width, height)
         })?;
         self.ensure_composite_membership_scratch_owner(composite_id, transform, width, height)?;
@@ -9233,18 +9249,17 @@ impl Renderer {
             }
         }
 
-        // A tile of an export must match the tiles already produced. Those
-        // were multisampled exactly when a multisample target was in use
-        // going into this call (the target only goes away with a resize, the
-        // option, clear() or a context change, none of which happen between
-        // tiles), so in that case any loss of multisampling during this call
-        // is an error rather than a point-sampled tile. With no target in use
-        // no multisampled tile exists yet and the call may fall back.
-        let must_stay_multisampled = mode == MaskRenderMode::Tile && self.msaa_target.is_some();
+        // A tile of an export must match the tiles already produced, which
+        // came out in the mode the masks were last drawn in. When that was
+        // multisampled, any loss of multisampling during this call is an
+        // error rather than a point-sampled tile. When nothing multisampled
+        // has been drawn yet the call may fall back.
+        let must_stay_multisampled = mode == MaskRenderMode::Tile && self.batch_multisampled;
 
-        // Decide whether this batch multisamples before any mask is drawn, so
-        // an allocation failure never leaves the batch half multisampled.
-        if self.preflight_msaa(active_layer_ids, width, height) && must_stay_multisampled {
+        // Decide the mode of this batch before any mask is drawn, so neither
+        // an allocation failure nor a layer that cannot multisample leaves
+        // the batch half multisampled.
+        if self.preflight_msaa(active_layer_ids, width, height)? && must_stay_multisampled {
             return Err(JsValue::from_str(MSAA_TILE_MODE_CHANGED));
         }
         self.render_active_masks(
@@ -9256,10 +9271,11 @@ impl Renderer {
             height_i32,
         )?;
         if self.msaa_fell_back {
-            // Multisampling stopped part-way (a resolve or target switch
-            // failed): the masks drawn so far in this batch are
-            // multisampled and the rest are not. Drop them all.
+            // Multisampling stopped part-way (a resolve failed): the masks
+            // drawn so far in this batch are multisampled and the rest are
+            // not. Drop them all; the batch continues point-sampled.
             self.mark_all_layers_dirty();
+            self.batch_multisampled = false;
             if must_stay_multisampled {
                 return Err(JsValue::from_str(MSAA_TILE_MODE_CHANGED));
             }
@@ -9308,18 +9324,22 @@ impl Renderer {
         Ok(())
     }
 
-    /// Runs `render` (which draws layer masks) and, if multisampling stopped
+    /// Decides the mode for the masks `ids` need (a composite's sources and
+    /// outline mask included), runs `render`, and if multisampling stopped
     /// being available during it, invalidates every mask and runs it once
-    /// more so the masks it produced are all point-sampled. The flag is not
-    /// cleared on entry: a fallback left behind by an earlier batch that
-    /// ended in an error is honoured here.
+    /// more so the masks it produced are all point-sampled.
     fn with_consistent_masks(
         &mut self,
+        ids: &[u32],
+        width: u32,
+        height: u32,
         mut render: impl FnMut(&mut Self) -> Result<(), JsValue>,
     ) -> Result<(), JsValue> {
+        self.preflight_msaa(ids, width, height)?;
         render(self)?;
         if self.msaa_fell_back {
             self.mark_all_layers_dirty();
+            self.batch_multisampled = false;
             render(self)?;
         }
         Ok(())
@@ -9332,40 +9352,55 @@ impl Renderer {
     /// batch is still pending, every cached mask is dropped so the batch is
     /// point-sampled from the start, and `true` is returned so the caller
     /// knows the mode changed. Costs one bool read with the option off.
-    fn preflight_msaa(&mut self, active_layer_ids: &[u32], width: u32, height: u32) -> bool {
-        if self.anti_aliasing {
-            let (needs_target, needs_stencil) = self.frame_mask_needs(active_layer_ids);
-            if needs_target {
-                let _ = self.ensure_msaa_target(width, height, needs_stencil);
+    fn preflight_msaa(
+        &mut self,
+        active_layer_ids: &[u32],
+        width: u32,
+        height: u32,
+    ) -> Result<bool, JsValue> {
+        let (r8_masks, other_masks, needs_stencil) = self.frame_mask_needs(active_layer_ids);
+        let multisampled = if !self.anti_aliasing {
+            false
+        } else if !r8_masks && !other_masks {
+            // Nothing to draw decides nothing.
+            self.batch_multisampled
+        } else if other_masks {
+            // A mask that cannot multisample makes the whole batch
+            // point-sampled, so no frame mixes the two.
+            false
+        } else {
+            self.ensure_msaa_target(width, height, needs_stencil);
+            if self.msaa_target.is_none() && self.gl.is_context_lost() {
+                // Not a fallback: nothing is recorded and the batch is
+                // abandoned until the context is restored.
+                return Err(JsValue::from_str(
+                    "WebGL context lost while rendering layer masks",
+                ));
             }
-        }
-        let fell_back = self.msaa_fell_back;
-        if fell_back {
+            self.msaa_target.is_some()
+        };
+        let lost = self.batch_multisampled && !multisampled;
+        if self.msaa_fell_back || self.batch_multisampled != multisampled {
             self.mark_all_layers_dirty();
         }
-        fell_back
+        self.batch_multisampled = multisampled;
+        Ok(lost)
     }
 
-    /// Whether this batch draws any mask that multisamples (an R8 mask) and
-    /// whether any of those needs the stencil: the active Gerber layers in
-    /// draw order, with the sources and outline mask of each active
-    /// composite. Walks the existing structures without allocating.
-    fn frame_mask_needs(&self, active_layer_ids: &[u32]) -> (bool, bool) {
-        let mut needs_target = false;
-        let mut needs_stencil = false;
+    /// The masks this batch draws: whether any is R8 (can multisample),
+    /// whether any is not (cannot), and whether an R8 one needs the stencil.
+    /// The active Gerber layers in draw order, with the sources and outline
+    /// mask of each active composite. Walks the existing structures without
+    /// allocating.
+    fn frame_mask_needs(&self, active_layer_ids: &[u32]) -> (bool, bool, bool) {
+        let mut needs = MaskNeeds::default();
         for &id in active_layer_ids {
-            self.visit_mask_needs(id as usize, 0, &mut needs_target, &mut needs_stencil);
+            self.visit_mask_needs(id as usize, 0, &mut needs);
         }
-        (needs_target, needs_stencil)
+        (needs.r8, needs.other, needs.stencil)
     }
 
-    fn visit_mask_needs(
-        &self,
-        idx: usize,
-        depth: usize,
-        needs_target: &mut bool,
-        needs_stencil: &mut bool,
-    ) {
+    fn visit_mask_needs(&self, idx: usize, depth: usize, needs: &mut MaskNeeds) {
         // Composites nest through their sources; the depth guard only
         // bounds a malformed cycle, which composite creation already rejects.
         const MAX_COMPOSITE_NESTING: usize = 16;
@@ -9374,20 +9409,17 @@ impl Renderer {
                 return;
             }
             for source in &composite.sources {
-                self.visit_mask_needs(source.layer_id(), depth + 1, needs_target, needs_stencil);
+                self.visit_mask_needs(source.layer_id(), depth + 1, needs);
             }
-            self.visit_mask_needs(
-                composite.outline_mask_id,
-                depth + 1,
-                needs_target,
-                needs_stencil,
-            );
+            self.visit_mask_needs(composite.outline_mask_id, depth + 1, needs);
             return;
         }
         if let Some(layer) = self.layers.get(idx).and_then(Option::as_ref) {
             if Self::mask_multisamples(layer.fbo.color_format) {
-                *needs_target = true;
-                *needs_stencil |= layer.has_path_regions;
+                needs.r8 = true;
+                needs.stencil |= layer.has_path_regions;
+            } else {
+                needs.other = true;
             }
         }
     }
@@ -9416,12 +9448,11 @@ impl Renderer {
                 .is_some_and(|target| target.stencil.is_some()),
             failed_size: self.msaa_failed_size,
             unexpected_error: self.msaa_unexpected_error,
-            rgba8_masks: self
-                .layers
-                .iter()
-                .flatten()
-                .filter(|layer| !Self::mask_multisamples(layer.fbo.color_format))
-                .count(),
+            mode: if self.batch_multisampled {
+                "multisampled"
+            } else {
+                "point-sampled"
+            },
         }
     }
 
@@ -9451,22 +9482,19 @@ impl Renderer {
                 layer.has_path_regions,
             )
         };
-        // Only an R8 mask multisamples. The RGBA8 fallback mask keeps its
+        // The batch mode was decided by preflight_msaa: multisampled only
+        // when every mask it draws is R8 (an RGBA8 fallback mask keeps its
         // coverage in alpha, which alpha-to-coverage would consume, and a
         // multisampled RGBA8 target would exceed the 8 bytes per pixel the
-        // export budget counts, so such a layer renders point-sampled,
-        // exactly as with the option off.
-        let msaa_framebuffer = if Self::mask_multisamples(color_format) {
+        // export budget counts). A point-sampled batch renders exactly as
+        // with the option off.
+        let msaa_framebuffer = if self.batch_multisampled && Self::mask_multisamples(color_format) {
             self.ensure_msaa_target(width, height, needs_stencil)
                 .map(|target| target.framebuffer.clone())
         } else {
             None
         };
-        if self.anti_aliasing
-            && Self::mask_multisamples(color_format)
-            && msaa_framebuffer.is_none()
-            && self.gl.is_context_lost()
-        {
+        if self.batch_multisampled && msaa_framebuffer.is_none() && self.gl.is_context_lost() {
             return Err(JsValue::from_str(
                 "WebGL context lost while rendering layer masks",
             ));

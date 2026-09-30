@@ -161,7 +161,9 @@ async function run(page, { layers, steps, inject = {}, size = 96 }) {
             const list = new Uint32Array(names.map((name) => ids[name]));
             processor.render_tile(list, colours(list.length), exportSize, exportSize, tileX, tileY, size, size, ...views.T, 1);
           } else if (step.restoreContext) {
+            // A restored context starts with a clean error state.
             lost = false;
+            pendingError = null;
           } else if (step.antiAliasing !== undefined) {
             processor.set_anti_aliasing(step.antiAliasing);
           }
@@ -174,7 +176,7 @@ async function run(page, { layers, steps, inject = {}, size = 96 }) {
             ...readAlpha(),
             status: diagnostics.status,
             stencil: diagnostics.stencil,
-            rgba8Masks: diagnostics.rgba8Masks,
+            mode: diagnostics.mode,
             storage: [...log.storage],
             blits: log.blits,
             error,
@@ -274,10 +276,12 @@ test("an offscreen render_pixels frame is redrawn point-sampled after a resolve 
   expect(same(r.mixed, r.again)).toBe(true);
 });
 
-test("a layer whose mask fell back to RGBA8 is drawn point-sampled, deterministically", async ({ page }) => {
-  // Multisampling is R8 only: an RGBA8 fallback mask (its R8 allocation was
-  // refused) renders exactly as with the option off, no RGBA8 multisample
-  // target is allocated, and the frame is the same whatever was drawn before.
+test("a layer whose mask fell back to RGBA8 makes the whole frame point-sampled", async ({ page }) => {
+  // Multisampling is R8 only. When a frame includes an RGBA8 fallback mask
+  // (its R8 allocation was refused) every layer of that frame renders
+  // point-sampled, exactly as with the option off, no RGBA8 multisample
+  // target is allocated, the frame is the same whatever was drawn before,
+  // and a frame without that layer multisamples again.
   const r = await run(page, {
     layers: ["A"],
     inject: { r8TextureFails: 2 },
@@ -285,22 +289,24 @@ test("a layer whose mask fell back to RGBA8 is drawn point-sampled, deterministi
       { render: ["A"] },
       { snapshot: "first" },
       { addLayer: "D" },
-      { render: ["D"] },
-      { snapshot: "rgba8Only" },
       { render: ["A", "D"] },
       { snapshot: "both" },
       { render: ["A", "D"], view: "U" },
       { render: ["A", "D"] },
       { snapshot: "again" },
+      { render: ["A"] },
+      { snapshot: "aloneAgain" },
     ],
   });
-  expect(r.first.status).toBe("ready");
+  expect(r.first.mode).toBe("multisampled");
   expect(r.first.partial).toBeGreaterThan(20);
-  expect(r.rgba8Only.status).toBe("ready");
-  expect(r.rgba8Only.rgba8Masks).toBe(1);
-  expect(r.rgba8Only.partial).toBe(0);
-  expect(r.rgba8Only.storage).toEqual([GL.R8]);
+  // A's slanted edges are point-sampled too while D is in the frame.
+  expect(r.both.mode).toBe("point-sampled");
+  expect(r.both.partial).toBe(0);
+  expect(r.both.storage).toEqual([GL.R8]);
   expect(same(r.both, r.again)).toBe(true);
+  expect(r.aloneAgain.mode).toBe("multisampled");
+  expect(same(r.aloneAgain, r.first)).toBe(true);
 });
 
 test("an unsupported stencil format gives up multisampling and renders as the option off", async ({ page }) => {

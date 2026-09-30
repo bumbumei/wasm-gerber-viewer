@@ -143,7 +143,9 @@ async function run(page, { layers, steps, inject = {} }) {
           processor.set_anti_aliasing(false);
           processor.set_anti_aliasing(true);
         } else if (step.restoreContext) {
+          // A restored context starts with a clean error state.
           lost = false;
+          pendingError = null;
         } else if (step.snapshot) {
           snapshots[step.snapshot] = { storage: [...log.storage], detached: [...log.detached], blits: log.blits, errors: [...errors] };
         }

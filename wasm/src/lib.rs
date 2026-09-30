@@ -1111,8 +1111,9 @@ impl GerberProcessor {
     /// Anti-aliasing state: `enabled`, `status` (off, pending, ready,
     /// size-limited, unsupported, unexpected), whether the shared multisample
     /// target and its stencil are allocated, the size a memory-limited
-    /// allocation failed at, the code of an unexpected GL failure, and the
-    /// number of layers whose mask fell back to RGBA8 (drawn point-sampled).
+    /// allocation failed at, the code of an unexpected GL failure, and `mode`,
+    /// the mode the masks were last drawn in ("multisampled" or
+    /// "point-sampled"), which is uniform across a frame.
     pub fn get_anti_aliasing_diagnostics(&self) -> Result<JsValue, JsValue> {
         let diagnostics = self
             .renderer
@@ -1147,10 +1148,7 @@ impl GerberProcessor {
                 .unexpected_error
                 .map_or(JsValue::NULL, |code| JsValue::from_f64(code as f64)),
         )?;
-        set(
-            "rgba8Masks",
-            JsValue::from_f64(diagnostics.rgba8_masks as f64),
-        )?;
+        set("mode", JsValue::from_str(diagnostics.mode))?;
         Ok(object.into())
     }
 
