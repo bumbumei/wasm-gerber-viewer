@@ -170,7 +170,15 @@ async function run(page, { layers, steps, inject = {}, size = 96 }) {
         }
         if (step.snapshot) {
           const diagnostics = processor.get_anti_aliasing_diagnostics?.() ?? { status: "n/a", stencil: null };
-          results[step.snapshot] = { ...readAlpha(), status: diagnostics.status, stencil: diagnostics.stencil, storage: [...log.storage], blits: log.blits, error };
+          results[step.snapshot] = {
+            ...readAlpha(),
+            status: diagnostics.status,
+            stencil: diagnostics.stencil,
+            rgba8Masks: diagnostics.rgba8Masks,
+            storage: [...log.storage],
+            blits: log.blits,
+            error,
+          };
         } else if (error && !step.expectError) {
           throw new Error(`step ${JSON.stringify(step)} failed: ${error}`);
         }
@@ -289,6 +297,7 @@ test("a layer whose mask fell back to RGBA8 is drawn point-sampled, deterministi
   expect(r.first.status).toBe("ready");
   expect(r.first.partial).toBeGreaterThan(20);
   expect(r.rgba8Only.status).toBe("ready");
+  expect(r.rgba8Only.rgba8Masks).toBe(1);
   expect(r.rgba8Only.partial).toBe(0);
   expect(r.rgba8Only.storage).toEqual([GL.R8]);
   expect(same(r.both, r.again)).toBe(true);

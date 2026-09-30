@@ -10,7 +10,6 @@ import { expect, test } from "@playwright/test";
 const GL = {
   R8: 0x8229,
   STENCIL_INDEX8: 0x8d48,
-  DEPTH24_STENCIL8: 0x88f0,
   STENCIL_ATTACHMENT: 0x8d20,
   OUT_OF_MEMORY: 0x0505,
   INVALID_VALUE: 0x0501,
@@ -156,7 +155,7 @@ async function run(page, { layers, steps, inject = {} }) {
   );
 }
 
-const { R8, STENCIL_INDEX8: S8, DEPTH24_STENCIL8: D24S8 } = GL;
+const { R8, STENCIL_INDEX8: S8 } = GL;
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/");

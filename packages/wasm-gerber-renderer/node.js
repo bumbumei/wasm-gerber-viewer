@@ -1493,6 +1493,9 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
     await writePngDocument(outputSink, width, height, pngColorType, async (writeRow) => {
       let streamState = preflightStreamState;
       preflightStreamState = null;
+      // The preflight bands were not written; the PNG's mode is that of its
+      // own first band.
+      if (streamState) streamState.antiAliasingMode = null;
       const bandRowBytes = width * 4;
       try {
         let tileY = 0;
@@ -1863,14 +1866,17 @@ const ANTI_ALIASING_MODE_CHANGED_MESSAGE =
   "Anti-aliasing mode changed during a tiled render; the export was stopped so the PNG does not mix anti-aliased and point-sampled bands.";
 
 /**
- * "multisampled" while the processor renders through its multisample target,
- * "point-sampled" otherwise (option off, or multisampling unavailable), null
- * for a WASM build without the diagnostics.
+ * The anti-aliasing mode a processor's frames come out in: "point-sampled"
+ * (option off, or multisampling unavailable), or "multisampled" qualified by
+ * the number of layers whose mask fell back to RGBA8 and are drawn
+ * point-sampled regardless, since a replacement processor could allocate
+ * those masks differently. Null for a WASM build without the diagnostics.
  */
 function streamAntiAliasingMode(processor) {
   if (typeof processor?.get_anti_aliasing_diagnostics !== "function") return null;
-  return processor.get_anti_aliasing_diagnostics().status === "ready"
-    ? "multisampled"
+  const diagnostics = processor.get_anti_aliasing_diagnostics();
+  return diagnostics.status === "ready"
+    ? `multisampled:${diagnostics.rgba8Masks ?? 0}`
     : "point-sampled";
 }
 

@@ -156,6 +156,10 @@ pub struct AntiAliasingDiagnostics {
     pub stencil_allocated: bool,
     pub failed_size: Option<(u32, u32)>,
     pub unexpected_error: Option<u32>,
+    /// Layers whose mask fell back to RGBA8 and therefore render
+    /// point-sampled whatever the option: part of what decides a frame's
+    /// look, so an exporter can pin it alongside the status.
+    pub rgba8_masks: usize,
 }
 
 /// Returned by a `render_tile*` call that would otherwise produce a tile in
@@ -191,8 +195,8 @@ pub struct Renderer {
     /// per-sample coverage: the shaders compute analytic edge alpha,
     /// SAMPLE_ALPHA_TO_COVERAGE turns it into a sample mask, and the blend
     /// writes one (dark) or zero (clear) to the covered samples. False for
-    /// the option-off path, the RGBA8 fallback mask (multisampled edges only)
-    /// and the direct fallback, which all render exactly as the option off.
+    /// the option-off path, an RGBA8 fallback mask and the direct fallback,
+    /// which all render exactly as the option off.
     mask_pass_analytic_edges: bool,
     layers: Vec<Option<LayerMetadata>>, // Sparse vec (None = deallocated slot)
     composites: Vec<Option<CompositeLayerMetadata>>,
@@ -9412,6 +9416,12 @@ impl Renderer {
                 .is_some_and(|target| target.stencil.is_some()),
             failed_size: self.msaa_failed_size,
             unexpected_error: self.msaa_unexpected_error,
+            rgba8_masks: self
+                .layers
+                .iter()
+                .flatten()
+                .filter(|layer| !Self::mask_multisamples(layer.fbo.color_format))
+                .count(),
         }
     }
 
@@ -9452,7 +9462,11 @@ impl Renderer {
         } else {
             None
         };
-        if self.anti_aliasing && msaa_framebuffer.is_none() && self.gl.is_context_lost() {
+        if self.anti_aliasing
+            && Self::mask_multisamples(color_format)
+            && msaa_framebuffer.is_none()
+            && self.gl.is_context_lost()
+        {
             return Err(JsValue::from_str(
                 "WebGL context lost while rendering layer masks",
             ));
