@@ -434,6 +434,25 @@ test("tiles: a resolve failure after the first tile fails the tile instead of mi
   expect(r.tile2again.partial).toBe(0);
 });
 
+test("tiles: turning the option off between tiles is not a mode-change error", async ({ page }) => {
+  // The option change drops the cached masks, so the next tile call has no
+  // multisampled masks to match and renders point-sampled without an error.
+  const r = await run(page, {
+    layers: ["A", "C"],
+    steps: [
+      { tile: { names: ["A", "C"], exportSize: 192, tileX: 0, tileY: 0 } },
+      { snapshot: "tile1" },
+      { antiAliasing: false },
+      { tile: { names: ["A", "C"], exportSize: 192, tileX: 96, tileY: 0 } },
+      { snapshot: "tile2" },
+    ],
+  });
+  expect(r.tile1.mode).toBe("multisampled");
+  expect(r.tile2.error).toBeNull();
+  expect(r.tile2.mode).toBe("point-sampled");
+  expect(r.tile2.partial).toBe(0);
+});
+
 test("tiles: a failure before the first tile of a fresh renderer falls back without an error", async ({ page }) => {
   // No multisampled tile exists yet, so a failure in the first call may fall
   // back silently: every tile of the export is point-sampled.

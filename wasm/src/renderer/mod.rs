@@ -4901,8 +4901,10 @@ impl Renderer {
     fn mark_all_layers_dirty(&mut self) {
         // Dropping every cached mask is what a multisampling fallback asks
         // for, so a pending fallback is satisfied here whichever caller
-        // (a batch, an option change) runs the invalidation.
+        // (a batch, an option change) runs the invalidation. With no cached
+        // masks there is no mode for the next batch to keep.
         self.msaa_fell_back = false;
+        self.batch_multisampled = false;
         self.composite_errors.clear();
         for layer in self.layers.iter_mut().flatten() {
             layer.fbo_dirty = true;
@@ -9358,26 +9360,32 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<bool, JsValue> {
-        let (r8_masks, other_masks, needs_stencil) = self.frame_mask_needs(active_layer_ids);
         let multisampled = if !self.anti_aliasing {
-            false
-        } else if !r8_masks && !other_masks {
-            // Nothing to draw decides nothing.
-            self.batch_multisampled
-        } else if other_masks {
-            // A mask that cannot multisample makes the whole batch
-            // point-sampled, so no frame mixes the two.
+            // The option-off path decides nothing and walks nothing.
             false
         } else {
-            self.ensure_msaa_target(width, height, needs_stencil);
-            if self.msaa_target.is_none() && self.gl.is_context_lost() {
-                // Not a fallback: nothing is recorded and the batch is
-                // abandoned until the context is restored.
-                return Err(JsValue::from_str(
-                    "WebGL context lost while rendering layer masks",
-                ));
+            let (r8_masks, other_masks, needs_stencil) = self.frame_mask_needs(active_layer_ids);
+            if !r8_masks && !other_masks {
+                // Nothing to draw decides nothing.
+                self.batch_multisampled
+            } else if other_masks {
+                // A mask that cannot multisample makes the whole batch
+                // point-sampled, so no frame mixes the two.
+                false
+            } else {
+                // Errors left by earlier work are not this allocation's; the
+                // mask pass drains them the same way before drawing.
+                Self::drain_gl_errors(&self.gl);
+                self.ensure_msaa_target(width, height, needs_stencil);
+                if self.msaa_target.is_none() && self.gl.is_context_lost() {
+                    // Not a fallback: nothing is recorded and the batch is
+                    // abandoned until the context is restored.
+                    return Err(JsValue::from_str(
+                        "WebGL context lost while rendering layer masks",
+                    ));
+                }
+                self.msaa_target.is_some()
             }
-            self.msaa_target.is_some()
         };
         let lost = self.batch_multisampled && !multisampled;
         if self.msaa_fell_back || self.batch_multisampled != multisampled {
@@ -9666,6 +9674,9 @@ impl Renderer {
         if let Some(target) = self.msaa_target.take() {
             Self::delete_msaa_target(&self.gl, target);
         }
+        // Callers release the target together with the cached masks (option
+        // off, clear, resize), so no multisampled masks remain to match.
+        self.batch_multisampled = false;
     }
 
     /// The failure a GL call just reported, if any: context loss first, then
@@ -10570,6 +10581,7 @@ impl Renderer {
         self.msaa_unsupported = false;
         self.msaa_failed_size = None;
         self.msaa_unexpected_error = None;
+        self.batch_multisampled = false;
         let old_programs = std::mem::replace(&mut self.programs, programs);
         let old_quad_buffer = std::mem::replace(&mut self.quad_buffer, quad_buffer);
         let old_fullscreen_vertex_array =
