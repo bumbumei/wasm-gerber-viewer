@@ -560,17 +560,10 @@ fn tile_inputs_reject_coordinates_beyond_exact_f32_integer_range() {
 }
 
 #[test]
-fn msaa_targets_only_sized_mask_formats() {
-    use web_sys::WebGl2RenderingContext;
-    assert_eq!(
-        Renderer::msaa_internal_format("R8"),
-        Some(WebGl2RenderingContext::R8)
-    );
-    assert_eq!(
-        Renderer::msaa_internal_format("RGBA8"),
-        Some(WebGl2RenderingContext::RGBA8)
-    );
-    assert_eq!(Renderer::msaa_internal_format("RGBA"), None);
+fn only_r8_masks_multisample() {
+    assert!(Renderer::mask_multisamples("R8"));
+    assert!(!Renderer::mask_multisamples("RGBA8"));
+    assert!(!Renderer::mask_multisamples("RGBA"));
 }
 
 #[test]

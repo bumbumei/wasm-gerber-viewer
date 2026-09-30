@@ -213,14 +213,12 @@ for (const [label, inject] of [
   ["an incomplete multisample framebuffer", { status: { format: S8, status: GL.FRAMEBUFFER_INCOMPLETE_MULTISAMPLE } }],
   ["a sample count the format rejects", { storage: { format: S8, error: GL.INVALID_OPERATION } }],
 ]) {
-  test(`${label} with STENCIL_INDEX8 falls back to DEPTH24_STENCIL8`, async ({ page }) => {
-    const r = await run(page, { layers: ["pathPad"], inject, steps: [{ render: ["pathPad"] }] });
-    expect(r.final.storage).toEqual([R8, S8, D24S8]);
-    if (inject.status) {
-      // The rejected STENCIL_ATTACHMENT is detached before DEPTH_STENCIL_ATTACHMENT is used.
-      expect(r.final.detached).toEqual([GL.STENCIL_ATTACHMENT]);
-    }
-    expect(r.final.blits).toBe(1);
+  test(`${label} with STENCIL_INDEX8 gives up multisampling instead of taking a larger format`, async ({ page }) => {
+    // The export budget counts 8 bytes per pixel for the target; a
+    // DEPTH24_STENCIL8 stencil would be 16, so there is no fallback format.
+    const r = await run(page, { layers: ["pathPad"], steps: [{ render: ["pathPad"] }, { render: ["pathPad"] }] , inject });
+    expect(r.final.storage).toEqual([R8, S8]);
+    expect(r.final.blits).toBe(0);
   });
 }
 

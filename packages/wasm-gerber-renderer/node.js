@@ -1535,11 +1535,12 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
                 throw error;
               }
               const nextTileWidth = reduceStreamTileWidth(streamState.tileWidth);
+              const antiAliasingMode = streamState.antiAliasingMode;
               disposeStreamRenderState(renderer, streamState, true);
               streamState = null;
               streamState = createStreamRenderStateWithFallback(
                 renderer,
-                renderPlan,
+                planForReplacementProcessor(renderPlan, antiAliasingMode),
                 nextTileWidth,
                 width,
                 height,
@@ -1549,6 +1550,7 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
                 layerCount,
                 pngChannels,
               );
+              streamState.antiAliasingMode = antiAliasingMode;
             }
           }
 
@@ -1621,10 +1623,11 @@ function preflightStreamCompositeFailures(
             throw error;
           }
           const nextTileWidth = reduceStreamTileWidth(streamState.tileWidth);
+          const antiAliasingMode = streamState.antiAliasingMode;
           disposeStreamRenderState(renderer, streamState, true);
           streamState = createStreamRenderStateWithFallback(
             renderer,
-            plan,
+            planForReplacementProcessor(plan, antiAliasingMode),
             nextTileWidth,
             width,
             height,
@@ -1634,6 +1637,7 @@ function preflightStreamCompositeFailures(
             layerCount,
             pngChannels,
           );
+          streamState.antiAliasingMode = antiAliasingMode;
         }
       }
       tileY += currentTileHeight;
@@ -1721,6 +1725,9 @@ function createStreamRenderState(
       renderContext,
       tilePixels: new Uint8Array(tileWidth * tileHeight * 4),
       bandPixels: new Uint8Array(width * tileHeight * 4),
+      // Anti-aliasing mode of the bands written so far, set by the first
+      // band and carried to a replacement processor.
+      antiAliasingMode: null,
     };
   } catch (error) {
     if (renderContext) {
@@ -1845,8 +1852,58 @@ function renderStreamBand(state, width, height, tileY, plan, bandRowBytes) {
         );
       }
     }
-    if (!retryBand) return currentTileHeight;
+    if (!retryBand) {
+      assertStreamAntiAliasingMode(state);
+      return currentTileHeight;
+    }
   }
+}
+
+const ANTI_ALIASING_MODE_CHANGED_MESSAGE =
+  "Anti-aliasing mode changed during a tiled render; the export was stopped so the PNG does not mix anti-aliased and point-sampled bands.";
+
+/**
+ * "multisampled" while the processor renders through its multisample target,
+ * "point-sampled" otherwise (option off, or multisampling unavailable), null
+ * for a WASM build without the diagnostics.
+ */
+function streamAntiAliasingMode(processor) {
+  if (typeof processor?.get_anti_aliasing_diagnostics !== "function") return null;
+  return processor.get_anti_aliasing_diagnostics().status === "ready"
+    ? "multisampled"
+    : "point-sampled";
+}
+
+/**
+ * Every band of one PNG must come out in the mode of the first band. The
+ * renderer keeps one render_tile call consistent and fails a tile that would
+ * change mode, but a band re-rendered on a fresh processor (after a tile
+ * error made the tiles smaller) has no such history, so the mode is pinned
+ * here and checked before a band's rows are written.
+ */
+function assertStreamAntiAliasingMode(state) {
+  const mode = streamAntiAliasingMode(state.renderContext.processor);
+  if (mode == null) return;
+  if (state.antiAliasingMode == null) {
+    state.antiAliasingMode = mode;
+    return;
+  }
+  if (state.antiAliasingMode !== mode) {
+    throw new Error(ANTI_ALIASING_MODE_CHANGED_MESSAGE);
+  }
+}
+
+/**
+ * The plan for a processor that replaces one whose bands were already
+ * written: point-sampled bands are continued with the option off (the same
+ * pixels, without asking the new context for a multisample target);
+ * multisampled bands keep the option on and the band check above catches a
+ * processor that cannot keep it.
+ */
+function planForReplacementProcessor(plan, antiAliasingMode) {
+  return antiAliasingMode === "point-sampled" && plan.antiAliasing === true
+    ? { ...plan, antiAliasing: false }
+    : plan;
 }
 
 function disposeStreamRenderState(renderer, state, releaseContext) {
@@ -3360,9 +3417,9 @@ function estimateRenderTargetBytes(width, height, targetCount) {
 
 // With anti-aliasing the renderer keeps one shared 4x multisample target:
 // R8 colour (4 bytes per pixel) plus STENCIL_INDEX8 (4 bytes per pixel),
-// the size of two RGBA render targets. The DEPTH24_STENCIL8 fallback and an
-// RGBA8 mask are larger and are not budgeted; they only occur when the
-// smaller formats are refused.
+// the size of two RGBA render targets. That is the only multisample
+// allocation it makes; a context that refuses either format renders the
+// masks point-sampled instead of taking a larger one.
 const MSAA_RENDER_TARGET_EQUIVALENTS = 2;
 
 function getFullFrameRenderTargetCount(layerCount, antiAliasing = false) {
@@ -3403,7 +3460,10 @@ function getStreamTileWidth(width, maxDimension = Number.POSITIVE_INFINITY) {
  */
 function isAntiAliasingModeChangeError(error) {
   const message = typeof error === "string" ? error : String(error?.message ?? "");
-  return message.includes("Anti-aliasing became unavailable during a tiled render");
+  return (
+    message.includes("Anti-aliasing became unavailable during a tiled render") ||
+    message.includes("Anti-aliasing mode changed during a tiled render")
+  );
 }
 
 function canReduceStreamTileWidth(tileWidth) {

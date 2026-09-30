@@ -266,30 +266,50 @@ test("an offscreen render_pixels frame is redrawn point-sampled after a resolve 
   expect(same(r.mixed, r.again)).toBe(true);
 });
 
-test("a target re-creation failure for a second mask format is handled the same way", async ({ page }) => {
-  // A's mask is R8. The next R8 texture allocation (C's mask) is refused, so
-  // C falls back to RGBA8 and needs an RGBA8 multisample target, whose
-  // allocation runs out of memory.
+test("a layer whose mask fell back to RGBA8 is drawn point-sampled, deterministically", async ({ page }) => {
+  // Multisampling is R8 only: an RGBA8 fallback mask (its R8 allocation was
+  // refused) renders exactly as with the option off, no RGBA8 multisample
+  // target is allocated, and the frame is the same whatever was drawn before.
   const r = await run(page, {
     layers: ["A"],
-    inject: { r8TextureFails: 2, storage: { format: GL.RGBA8, error: GL.OUT_OF_MEMORY } },
+    inject: { r8TextureFails: 2 },
     steps: [
       { render: ["A"] },
       { snapshot: "first" },
-      { addLayer: "C" },
-      { render: ["A", "C"] },
-      { snapshot: "mixed" },
-      { render: ["A", "C"], view: "U" },
-      { render: ["A", "C"] },
+      { addLayer: "D" },
+      { render: ["D"] },
+      { snapshot: "rgba8Only" },
+      { render: ["A", "D"] },
+      { snapshot: "both" },
+      { render: ["A", "D"], view: "U" },
+      { render: ["A", "D"] },
       { snapshot: "again" },
     ],
   });
   expect(r.first.status).toBe("ready");
   expect(r.first.partial).toBeGreaterThan(20);
-  expect(r.mixed.storage).toEqual([GL.R8, GL.RGBA8]);
-  expect(r.mixed.status).toBe("size-limited");
-  expect(r.mixed.partial).toBe(0);
-  expect(same(r.mixed, r.again)).toBe(true);
+  expect(r.rgba8Only.status).toBe("ready");
+  expect(r.rgba8Only.partial).toBe(0);
+  expect(r.rgba8Only.storage).toEqual([GL.R8]);
+  expect(same(r.both, r.again)).toBe(true);
+});
+
+test("an unsupported stencil format gives up multisampling and renders as the option off", async ({ page }) => {
+  const r = await run(page, {
+    layers: ["D", "B"],
+    inject: { storage: { format: GL.STENCIL_INDEX8, error: GL.INVALID_OPERATION } },
+    steps: [
+      { render: ["D", "B"] },
+      { snapshot: "fallback" },
+      { antiAliasing: false },
+      { render: ["D", "B"] },
+      { snapshot: "off" },
+    ],
+  });
+  expect(r.fallback.status).toBe("unsupported");
+  expect(r.fallback.storage).toEqual([GL.R8, GL.STENCIL_INDEX8]);
+  expect(r.fallback.partial).toBe(0);
+  expect(same(r.fallback, r.off)).toBe(true);
 });
 
 test("a composite is rebuilt from point-sampled sources in the same call", async ({ page }) => {
@@ -394,36 +414,6 @@ test("tiles: a resolve failure after the first tile fails the tile instead of mi
   expect(r.tile1.status).toBe("ready");
   expect(r.tile2.error).toContain("tiled render");
   expect(r.tile2.status).toBe("unsupported");
-  // A later call at the same tile succeeds point-sampled.
-  expect(r.tile2again.error).toBeNull();
-  expect(r.tile2again.partial).toBe(0);
-});
-
-test("tiles: a target re-creation failure before a later tile fails that tile instead of mixing modes", async ({ page }) => {
-  // A has an R8 mask; C's R8 allocation is refused so its mask is RGBA8. The
-  // first tile draws A then C multisampled and leaves the shared target in
-  // RGBA8. The second tile's preflight re-creates the R8 target (the second
-  // R8 allocation overall) and that fails: the tile must not come out
-  // point-sampled next to the multisampled first tile.
-  const r = await run(page, {
-    layers: ["A"],
-    inject: { r8TextureFails: 2, storage: { format: GL.R8, error: GL.OUT_OF_MEMORY, occurrence: 2 } },
-    steps: [
-      { addLayer: "C" },
-      { tile: { names: ["A", "C"], exportSize: 192, tileX: 0, tileY: 0 } },
-      { snapshot: "tile1" },
-      { tile: { names: ["A", "C"], exportSize: 192, tileX: 96, tileY: 0 }, expectError: true },
-      { snapshot: "tile2" },
-      { tile: { names: ["A", "C"], exportSize: 192, tileX: 96, tileY: 0 } },
-      { snapshot: "tile2again" },
-    ],
-  });
-  expect(r.tile1.error).toBeNull();
-  expect(r.tile1.status).toBe("ready");
-  expect(r.tile1.partial).toBeGreaterThan(20);
-  expect(r.tile1.storage).toEqual([GL.R8, GL.RGBA8]);
-  expect(r.tile2.error).toContain("tiled render");
-  expect(r.tile2.status).toBe("size-limited");
   // A later call at the same tile succeeds point-sampled.
   expect(r.tile2again.error).toBeNull();
   expect(r.tile2again.partial).toBe(0);

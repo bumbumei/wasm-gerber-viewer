@@ -103,13 +103,13 @@ struct MsaaTarget {
     color: web_sys::WebGlRenderbuffer,
     /// Allocated the first time a layer that needs it (one with path
     /// regions, the same test as the layer's own FBO) is drawn, then kept
-    /// for every later layer. `STENCIL_INDEX8` where the context
-    /// multisamples it at the colour's sample count, otherwise
-    /// `DEPTH24_STENCIL8`.
+    /// for every later layer. Always `STENCIL_INDEX8`: with the R8 colour
+    /// that is 8 bytes per pixel at 4 samples, the figure the export budget
+    /// counts, and a context that cannot multisample it renders the masks
+    /// point-sampled rather than taking a larger format.
     stencil: Option<web_sys::WebGlRenderbuffer>,
     width: u32,
     height: u32,
-    internal_format: u32,
     samples: i32,
 }
 
@@ -118,10 +118,11 @@ struct MsaaTarget {
 /// the one kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MsaaFailure {
-    /// The context cannot multisample the mask: fewer than two samples, or
-    /// every candidate format is unsupported or incompatible in sample count
-    /// (`INVALID_OPERATION` from the storage call, `FRAMEBUFFER_UNSUPPORTED`
-    /// or `FRAMEBUFFER_INCOMPLETE_MULTISAMPLE`). Lasts until context restore.
+    /// The context cannot multisample the R8 mask with a `STENCIL_INDEX8`
+    /// stencil: fewer than two samples, or a format unsupported or
+    /// incompatible in sample count (`INVALID_OPERATION` from the storage
+    /// call, `FRAMEBUFFER_UNSUPPORTED` or `FRAMEBUFFER_INCOMPLETE_MULTISAMPLE`).
+    /// The masks render point-sampled until the context is restored.
     Unsupported,
     /// `OUT_OF_MEMORY` or `INVALID_VALUE` (a size the context will not
     /// allocate). Not retried at this size; another size or toggling the
@@ -9329,9 +9330,9 @@ impl Renderer {
     /// knows the mode changed. Costs one bool read with the option off.
     fn preflight_msaa(&mut self, active_layer_ids: &[u32], width: u32, height: u32) -> bool {
         if self.anti_aliasing {
-            let (first_format, needs_stencil) = self.frame_mask_needs(active_layer_ids);
-            if let Some(format) = first_format {
-                let _ = self.ensure_msaa_target(width, height, format, needs_stencil);
+            let (needs_target, needs_stencil) = self.frame_mask_needs(active_layer_ids);
+            if needs_target {
+                let _ = self.ensure_msaa_target(width, height, needs_stencil);
             }
         }
         let fell_back = self.msaa_fell_back;
@@ -9341,24 +9342,24 @@ impl Renderer {
         fell_back
     }
 
-    /// The multisample format of the first mask this batch will draw and
-    /// whether any of them needs the stencil: the active Gerber layers in
+    /// Whether this batch draws any mask that multisamples (an R8 mask) and
+    /// whether any of those needs the stencil: the active Gerber layers in
     /// draw order, with the sources and outline mask of each active
     /// composite. Walks the existing structures without allocating.
-    fn frame_mask_needs(&self, active_layer_ids: &[u32]) -> (Option<u32>, bool) {
-        let mut first_format = None;
+    fn frame_mask_needs(&self, active_layer_ids: &[u32]) -> (bool, bool) {
+        let mut needs_target = false;
         let mut needs_stencil = false;
         for &id in active_layer_ids {
-            self.visit_mask_needs(id as usize, 0, &mut first_format, &mut needs_stencil);
+            self.visit_mask_needs(id as usize, 0, &mut needs_target, &mut needs_stencil);
         }
-        (first_format, needs_stencil)
+        (needs_target, needs_stencil)
     }
 
     fn visit_mask_needs(
         &self,
         idx: usize,
         depth: usize,
-        first_format: &mut Option<u32>,
+        needs_target: &mut bool,
         needs_stencil: &mut bool,
     ) {
         // Composites nest through their sources; the depth guard only
@@ -9369,21 +9370,21 @@ impl Renderer {
                 return;
             }
             for source in &composite.sources {
-                self.visit_mask_needs(source.layer_id(), depth + 1, first_format, needs_stencil);
+                self.visit_mask_needs(source.layer_id(), depth + 1, needs_target, needs_stencil);
             }
             self.visit_mask_needs(
                 composite.outline_mask_id,
                 depth + 1,
-                first_format,
+                needs_target,
                 needs_stencil,
             );
             return;
         }
         if let Some(layer) = self.layers.get(idx).and_then(Option::as_ref) {
-            if first_format.is_none() {
-                *first_format = Self::msaa_internal_format(layer.fbo.color_format);
+            if Self::mask_multisamples(layer.fbo.color_format) {
+                *needs_target = true;
+                *needs_stencil |= layer.has_path_regions;
             }
-            *needs_stencil |= layer.has_path_regions;
         }
     }
 
@@ -9440,25 +9441,30 @@ impl Renderer {
                 layer.has_path_regions,
             )
         };
-        let msaa_framebuffer = Self::msaa_internal_format(color_format)
-            .and_then(|format| self.ensure_msaa_target(width, height, format, needs_stencil))
-            .map(|target| target.framebuffer.clone());
+        // Only an R8 mask multisamples. The RGBA8 fallback mask keeps its
+        // coverage in alpha, which alpha-to-coverage would consume, and a
+        // multisampled RGBA8 target would exceed the 8 bytes per pixel the
+        // export budget counts, so such a layer renders point-sampled,
+        // exactly as with the option off.
+        let msaa_framebuffer = if Self::mask_multisamples(color_format) {
+            self.ensure_msaa_target(width, height, needs_stencil)
+                .map(|target| target.framebuffer.clone())
+        } else {
+            None
+        };
         if self.anti_aliasing && msaa_framebuffer.is_none() && self.gl.is_context_lost() {
             return Err(JsValue::from_str(
                 "WebGL context lost while rendering layer masks",
             ));
         }
         if let Some(msaa_framebuffer) = &msaa_framebuffer {
-            // Per-sample coverage needs the mask in red (R8); an RGBA8 fallback
-            // mask keeps its coverage in alpha, which alpha-to-coverage would
-            // consume, so it gets multisampled edges only.
             self.render_layer_mask_into(
                 layer_idx,
                 msaa_framebuffer,
                 &transform,
                 width,
                 height,
-                color_format == "R8",
+                true,
             )?;
             // A geometry draw error is a rendering error like before, not a
             // reason to give up multisampling.
@@ -9538,21 +9544,16 @@ impl Renderer {
         result
     }
 
-    /// Multisampled renderbuffer format matching a layer mask texture, or
-    /// `None` when the mask uses a format a resolve blit cannot target.
-    fn msaa_internal_format(color_format: &str) -> Option<u32> {
-        match color_format {
-            "R8" => Some(WebGl2RenderingContext::R8),
-            "RGBA8" => Some(WebGl2RenderingContext::RGBA8),
-            _ => None,
-        }
+    /// Whether a layer mask of this format is drawn through the multisample
+    /// target: only R8, whose resolve needs a matching R8 target.
+    fn mask_multisamples(color_format: &str) -> bool {
+        color_format == "R8"
     }
 
     fn ensure_msaa_target(
         &mut self,
         width: u32,
         height: u32,
-        internal_format: u32,
         needs_stencil: bool,
     ) -> Option<&MsaaTarget> {
         if !self.anti_aliasing
@@ -9562,16 +9563,15 @@ impl Renderer {
         {
             return None;
         }
-        let matches = self.msaa_target.as_ref().is_some_and(|target| {
-            target.width == width
-                && target.height == height
-                && target.internal_format == internal_format
-        });
+        let matches = self
+            .msaa_target
+            .as_ref()
+            .is_some_and(|target| target.width == width && target.height == height);
         if !matches {
             if let Some(old) = self.msaa_target.take() {
                 Self::delete_msaa_target(&self.gl, old);
             }
-            match Self::create_msaa_target(&self.gl, width, height, internal_format) {
+            match Self::create_msaa_target(&self.gl, width, height) {
                 Ok(target) => {
                     self.msaa_failed_size = None;
                     self.msaa_target = Some(target);
@@ -9590,8 +9590,9 @@ impl Renderer {
                 .and_then(|target| Self::attach_msaa_stencil(&self.gl, target).err());
             if let Some(failure) = failure {
                 // Rendering this layer's paths needs the stencil; without it
-                // the whole target is dropped rather than anti-aliasing some
-                // layers and not others.
+                // the whole target is dropped and the masks render
+                // point-sampled rather than anti-aliasing some layers and
+                // not others, or growing the target with another format.
                 self.release_msaa_target();
                 self.note_msaa_failure(failure, width, height);
                 return None;
@@ -9667,13 +9668,12 @@ impl Renderer {
         }
     }
 
-    /// A colour-only multisample target. The stencil is added later by
+    /// A colour-only R8 multisample target. The stencil is added later by
     /// `attach_msaa_stencil`, only for layers that need it.
     fn create_msaa_target(
         gl: &WebGl2RenderingContext,
         width: u32,
         height: u32,
-        internal_format: u32,
     ) -> Result<MsaaTarget, MsaaFailure> {
         // Start from a clean error state so a failure below is this
         // allocation's; an error already pending is reported, not dropped.
@@ -9706,7 +9706,6 @@ impl Renderer {
             stencil: None,
             width,
             height,
-            internal_format,
             samples,
         };
 
@@ -9714,7 +9713,7 @@ impl Renderer {
         gl.renderbuffer_storage_multisample(
             WebGl2RenderingContext::RENDERBUFFER,
             samples,
-            internal_format,
+            WebGl2RenderingContext::R8,
             width_i32,
             height_i32,
         );
@@ -9745,12 +9744,11 @@ impl Renderer {
         Ok(target)
     }
 
-    /// Adds a stencil renderbuffer at the target's size and sample count.
-    /// `STENCIL_INDEX8` costs one byte per sample; `DEPTH24_STENCIL8` is
-    /// tried only when the first is unsupported or incompatible in sample
-    /// count, never after a memory, size, context-loss or unexpected failure.
-    /// A rejected candidate is detached before the next one because the two
-    /// use different attachment points.
+    /// Adds a `STENCIL_INDEX8` renderbuffer at the target's size and sample
+    /// count. There is no larger fallback format: the export budget counts
+    /// 8 bytes per pixel for the whole target, so a context that cannot
+    /// multisample this stencil gives up multisampling and the masks render
+    /// point-sampled. The caller drops the target on any error.
     fn attach_msaa_stencil(
         gl: &WebGl2RenderingContext,
         target: &mut MsaaTarget,
@@ -9762,74 +9760,41 @@ impl Renderer {
             .map_err(|_| MsaaFailure::SizeLimited)?;
         let height_i32 = Self::checked_u32_to_i32("MSAA height", target.height)
             .map_err(|_| MsaaFailure::SizeLimited)?;
-        for (stencil_format, attachment) in [
-            (
-                WebGl2RenderingContext::STENCIL_INDEX8,
-                WebGl2RenderingContext::STENCIL_ATTACHMENT,
-            ),
-            (
-                WebGl2RenderingContext::DEPTH24_STENCIL8,
-                WebGl2RenderingContext::DEPTH_STENCIL_ATTACHMENT,
-            ),
-        ] {
-            let stencil = gl.create_renderbuffer().ok_or(MsaaFailure::ContextLost)?;
-            gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, Some(&stencil));
-            gl.renderbuffer_storage_multisample(
-                WebGl2RenderingContext::RENDERBUFFER,
-                target.samples,
-                stencil_format,
-                width_i32,
-                height_i32,
-            );
-            gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
-            match Self::msaa_storage_failure(gl) {
-                None => {}
-                Some(MsaaFailure::Unsupported) => {
-                    gl.delete_renderbuffer(Some(&stencil));
-                    continue;
-                }
-                Some(failure) => {
-                    gl.delete_renderbuffer(Some(&stencil));
-                    return Err(failure);
-                }
-            }
-
-            gl.bind_framebuffer(
-                WebGl2RenderingContext::FRAMEBUFFER,
-                Some(&target.framebuffer),
-            );
-            gl.framebuffer_renderbuffer(
-                WebGl2RenderingContext::FRAMEBUFFER,
-                attachment,
-                WebGl2RenderingContext::RENDERBUFFER,
-                Some(&stencil),
-            );
-            let status = gl.check_framebuffer_status(WebGl2RenderingContext::FRAMEBUFFER);
-            let failure = Self::msaa_gl_failure(gl).or_else(|| Self::msaa_status_failure(status));
-            if failure.is_some() {
-                gl.framebuffer_renderbuffer(
-                    WebGl2RenderingContext::FRAMEBUFFER,
-                    attachment,
-                    WebGl2RenderingContext::RENDERBUFFER,
-                    None,
-                );
-            }
-            gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
-            match failure {
-                None => {
-                    target.stencil = Some(stencil);
-                    return Ok(());
-                }
-                Some(MsaaFailure::Unsupported) => {
-                    gl.delete_renderbuffer(Some(&stencil));
-                }
-                Some(failure) => {
-                    gl.delete_renderbuffer(Some(&stencil));
-                    return Err(failure);
-                }
-            }
+        let stencil = gl.create_renderbuffer().ok_or(MsaaFailure::ContextLost)?;
+        gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, Some(&stencil));
+        gl.renderbuffer_storage_multisample(
+            WebGl2RenderingContext::RENDERBUFFER,
+            target.samples,
+            WebGl2RenderingContext::STENCIL_INDEX8,
+            width_i32,
+            height_i32,
+        );
+        gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
+        if let Some(failure) = Self::msaa_storage_failure(gl) {
+            gl.delete_renderbuffer(Some(&stencil));
+            return Err(failure);
         }
-        Err(MsaaFailure::Unsupported)
+
+        gl.bind_framebuffer(
+            WebGl2RenderingContext::FRAMEBUFFER,
+            Some(&target.framebuffer),
+        );
+        gl.framebuffer_renderbuffer(
+            WebGl2RenderingContext::FRAMEBUFFER,
+            WebGl2RenderingContext::STENCIL_ATTACHMENT,
+            WebGl2RenderingContext::RENDERBUFFER,
+            Some(&stencil),
+        );
+        let status = gl.check_framebuffer_status(WebGl2RenderingContext::FRAMEBUFFER);
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+        if let Some(failure) =
+            Self::msaa_gl_failure(gl).or_else(|| Self::msaa_status_failure(status))
+        {
+            gl.delete_renderbuffer(Some(&stencil));
+            return Err(failure);
+        }
+        target.stencil = Some(stencil);
+        Ok(())
     }
 
     fn delete_msaa_target(gl: &WebGl2RenderingContext, target: MsaaTarget) {
