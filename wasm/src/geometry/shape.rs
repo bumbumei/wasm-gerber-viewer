@@ -1,4 +1,5 @@
 use crate::geometry::{RegionContour, RegionSegment};
+use crate::util::checked_u32_len;
 use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array};
 use wasm_bindgen::prelude::*;
 
@@ -13,20 +14,24 @@ fn get_property(value: &JsValue, key: &str) -> Result<JsValue, JsValue> {
         .map_err(|_| JsValue::from_str(&format!("Missing parsed layer field `{key}`")))
 }
 
-fn f32_array_to_js(values: &[f32]) -> JsValue {
-    let array = Float32Array::new_with_length(values.len() as u32);
+fn typed_array_length(len: usize) -> Result<u32, JsValue> {
+    checked_u32_len(len, "a parsed geometry array").map_err(|message| JsValue::from_str(&message))
+}
+
+fn f32_array_to_js(values: &[f32]) -> Result<JsValue, JsValue> {
+    let array = Float32Array::new_with_length(typed_array_length(values.len())?);
     array.copy_from(values);
-    array.into()
+    Ok(array.into())
 }
 
 fn f32_array_from_js(value: &JsValue, key: &str) -> Result<Vec<f32>, JsValue> {
     Ok(Float32Array::new(&get_property(value, key)?).to_vec())
 }
 
-fn u32_array_to_js(values: &[u32]) -> JsValue {
-    let array = Uint32Array::new_with_length(values.len() as u32);
+fn u32_array_to_js(values: &[u32]) -> Result<JsValue, JsValue> {
+    let array = Uint32Array::new_with_length(typed_array_length(values.len())?);
     array.copy_from(values);
-    array.into()
+    Ok(array.into())
 }
 
 fn u32_array_from_js(value: &JsValue, key: &str) -> Result<Vec<u32>, JsValue> {
@@ -113,10 +118,10 @@ impl Triangles {
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
         let object = Object::new();
-        set_property(&object, "vertices", &f32_array_to_js(&self.vertices))?;
-        set_property(&object, "holeX", &f32_array_to_js(&self.hole_x))?;
-        set_property(&object, "holeY", &f32_array_to_js(&self.hole_y))?;
-        set_property(&object, "holeRadius", &f32_array_to_js(&self.hole_radius))?;
+        set_property(&object, "vertices", &f32_array_to_js(&self.vertices)?)?;
+        set_property(&object, "holeX", &f32_array_to_js(&self.hole_x)?)?;
+        set_property(&object, "holeY", &f32_array_to_js(&self.hole_y)?)?;
+        set_property(&object, "holeRadius", &f32_array_to_js(&self.hole_radius)?)?;
         Ok(object.into())
     }
 
@@ -162,9 +167,9 @@ impl TriangleTemplateInstances {
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
         let object = Object::new();
-        set_property(&object, "vertices", &f32_array_to_js(&self.vertices))?;
-        set_property(&object, "instanceX", &f32_array_to_js(&self.instance_x))?;
-        set_property(&object, "instanceY", &f32_array_to_js(&self.instance_y))?;
+        set_property(&object, "vertices", &f32_array_to_js(&self.vertices)?)?;
+        set_property(&object, "instanceX", &f32_array_to_js(&self.instance_x)?)?;
+        set_property(&object, "instanceY", &f32_array_to_js(&self.instance_y)?)?;
         Ok(object.into())
     }
 
@@ -218,11 +223,11 @@ impl Lines {
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
         let object = Object::new();
-        set_property(&object, "startX", &f32_array_to_js(&self.start_x))?;
-        set_property(&object, "startY", &f32_array_to_js(&self.start_y))?;
-        set_property(&object, "endX", &f32_array_to_js(&self.end_x))?;
-        set_property(&object, "endY", &f32_array_to_js(&self.end_y))?;
-        set_property(&object, "width", &f32_array_to_js(&self.width))?;
+        set_property(&object, "startX", &f32_array_to_js(&self.start_x)?)?;
+        set_property(&object, "startY", &f32_array_to_js(&self.start_y)?)?;
+        set_property(&object, "endX", &f32_array_to_js(&self.end_x)?)?;
+        set_property(&object, "endY", &f32_array_to_js(&self.end_y)?)?;
+        set_property(&object, "width", &f32_array_to_js(&self.width)?)?;
         Ok(object.into())
     }
 
@@ -282,12 +287,12 @@ impl Circles {
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
         let object = Object::new();
-        set_property(&object, "x", &f32_array_to_js(&self.x))?;
-        set_property(&object, "y", &f32_array_to_js(&self.y))?;
-        set_property(&object, "radius", &f32_array_to_js(&self.radius))?;
-        set_property(&object, "holeX", &f32_array_to_js(&self.hole_x))?;
-        set_property(&object, "holeY", &f32_array_to_js(&self.hole_y))?;
-        set_property(&object, "holeRadius", &f32_array_to_js(&self.hole_radius))?;
+        set_property(&object, "x", &f32_array_to_js(&self.x)?)?;
+        set_property(&object, "y", &f32_array_to_js(&self.y)?)?;
+        set_property(&object, "radius", &f32_array_to_js(&self.radius)?)?;
+        set_property(&object, "holeX", &f32_array_to_js(&self.hole_x)?)?;
+        set_property(&object, "holeY", &f32_array_to_js(&self.hole_y)?)?;
+        set_property(&object, "holeRadius", &f32_array_to_js(&self.hole_radius)?)?;
         Ok(object.into())
     }
 
@@ -347,12 +352,12 @@ impl Arcs {
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
         let object = Object::new();
-        set_property(&object, "x", &f32_array_to_js(&self.x))?;
-        set_property(&object, "y", &f32_array_to_js(&self.y))?;
-        set_property(&object, "radius", &f32_array_to_js(&self.radius))?;
-        set_property(&object, "startAngle", &f32_array_to_js(&self.start_angle))?;
-        set_property(&object, "sweepAngle", &f32_array_to_js(&self.sweep_angle))?;
-        set_property(&object, "thickness", &f32_array_to_js(&self.thickness))?;
+        set_property(&object, "x", &f32_array_to_js(&self.x)?)?;
+        set_property(&object, "y", &f32_array_to_js(&self.y)?)?;
+        set_property(&object, "radius", &f32_array_to_js(&self.radius)?)?;
+        set_property(&object, "startAngle", &f32_array_to_js(&self.start_angle)?)?;
+        set_property(&object, "sweepAngle", &f32_array_to_js(&self.sweep_angle)?)?;
+        set_property(&object, "thickness", &f32_array_to_js(&self.thickness)?)?;
         Ok(object.into())
     }
 
@@ -412,24 +417,24 @@ impl Thermals {
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
         let object = Object::new();
-        set_property(&object, "x", &f32_array_to_js(&self.x))?;
-        set_property(&object, "y", &f32_array_to_js(&self.y))?;
+        set_property(&object, "x", &f32_array_to_js(&self.x)?)?;
+        set_property(&object, "y", &f32_array_to_js(&self.y)?)?;
         set_property(
             &object,
             "outerDiameter",
-            &f32_array_to_js(&self.outer_diameter),
+            &f32_array_to_js(&self.outer_diameter)?,
         )?;
         set_property(
             &object,
             "innerDiameter",
-            &f32_array_to_js(&self.inner_diameter),
+            &f32_array_to_js(&self.inner_diameter)?,
         )?;
         set_property(
             &object,
             "gapThickness",
-            &f32_array_to_js(&self.gap_thickness),
+            &f32_array_to_js(&self.gap_thickness)?,
         )?;
-        set_property(&object, "rotation", &f32_array_to_js(&self.rotation))?;
+        set_property(&object, "rotation", &f32_array_to_js(&self.rotation)?)?;
         Ok(object.into())
     }
 
@@ -781,17 +786,17 @@ impl PathRegions {
         set_property(
             &object,
             "wedgeVertices",
-            &f32_array_to_js(&self.wedge_vertices),
+            &f32_array_to_js(&self.wedge_vertices)?,
         )?;
         set_property(
             &object,
             "wedgeVertexOffsets",
-            &u32_array_to_js(&self.wedge_vertex_offsets),
+            &u32_array_to_js(&self.wedge_vertex_offsets)?,
         )?;
         set_property(
             &object,
             "sectorVertices",
-            &f32_array_to_js(&self.sector_vertices),
+            &f32_array_to_js(&self.sector_vertices)?,
         )?;
         set_property(
             &object,
@@ -801,17 +806,17 @@ impl PathRegions {
         set_property(
             &object,
             "sectorVertexOffsets",
-            &u32_array_to_js(&self.sector_vertex_offsets),
+            &u32_array_to_js(&self.sector_vertex_offsets)?,
         )?;
         set_property(
             &object,
             "coverVertices",
-            &f32_array_to_js(&self.cover_vertices),
+            &f32_array_to_js(&self.cover_vertices)?,
         )?;
         set_property(
             &object,
             "clearVertices",
-            &f32_array_to_js(&self.clear_vertices),
+            &f32_array_to_js(&self.clear_vertices)?,
         )?;
         Ok(object.into())
     }

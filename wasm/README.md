@@ -75,7 +75,10 @@ The public boundary is mostly defined in `wasm/src/lib.rs`.
 
 Key APIs:
 
-- `init_panic_hook()`: installs browser-console panic reporting.
+- `init_panic_hook()`: installs browser-console panic reporting, on the
+  memory64 build as well.
+- `memory_address_bits()`: `32` for the wasm32 package, `64` for the memory64
+  package that `scripts/build-wasm64.sh` writes to `wasm/pkg64`.
 - `reserve_input_capacity(byte_count)`: preflights large JS-to-WASM input
   copies with catchable allocation errors.
 - `parse_gerber_layer*()`: parses Gerber input and returns JS render geometry
