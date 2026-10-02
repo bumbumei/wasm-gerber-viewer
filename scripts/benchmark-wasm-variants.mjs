@@ -12,6 +12,7 @@
 //
 // Environment:
 //   WASM_BENCHMARK_ROUNDS    viewer loads per configuration (default 5)
+//   WASM_BENCHMARK_CONFIGURATIONS  subset to load, e.g. "wasm32,mixed"
 //   WASM_BENCHMARK_SCALE     multiplies the generated layer sizes (default 1)
 //   WASM_BENCHMARK_PORT      static server port (default 4186)
 //   WASM_BENCHMARK_CHANNEL   Playwright browser channel (default bundled Chromium)
@@ -31,11 +32,16 @@ const scale = Number(process.env.WASM_BENCHMARK_SCALE ?? 1);
 const channel = process.env.WASM_BENCHMARK_CHANNEL;
 const allowSoftware = process.env.WASM_BENCHMARK_ALLOW_SOFTWARE === "1";
 const baseUrl = `http://127.0.0.1:${port}`;
+const selectedConfigurations = (process.env.WASM_BENCHMARK_CONFIGURATIONS ?? "")
+  .split(",")
+  .filter(Boolean);
 const CONFIGURATIONS = [
   { name: "wasm32", query: "?wasm=32" },
   { name: "wasm64", query: "?wasm=64" },
   { name: "mixed", query: "" },
-];
+].filter(
+  ({ name }) => selectedConfigurations.length === 0 || selectedConfigurations.includes(name),
+);
 const BUILDS = [
   { name: "wasm32", dir: "pkg" },
   { name: "wasm64", dir: "pkg64" },
