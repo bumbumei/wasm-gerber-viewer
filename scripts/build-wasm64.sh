@@ -115,8 +115,9 @@ echo "Building wasm64 with $(rustc --version)"
 
 # --- wasm-bindgen CLI -----------------------------------------------------
 
+# A checkout with CRLF line endings (Windows, read from WSL) still parses.
 wasm_bindgen_version="$(
-  awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' \
+  awk '/^name = "wasm-bindgen"\r?$/ { getline; gsub(/version = |"|\r/, ""); print; exit }' \
     "$REPO_ROOT/wasm/Cargo.lock"
 )"
 if [[ -z "$wasm_bindgen_version" ]]; then
