@@ -30,6 +30,35 @@ const DRILL_OUTLINE_WIDTH_MM: f32 = 0.0;
 pub fn init_panic_hook() {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
+    #[cfg(target_arch = "wasm64")]
+    set_wasm64_panic_hook_once();
+}
+
+/// `console_error_panic_hook` only reports on wasm32 and writes to a stderr
+/// that does not exist anywhere else, so a memory64 build logs its own panics.
+#[cfg(target_arch = "wasm64")]
+fn set_wasm64_panic_hook_once() {
+    static SET_HOOK: std::sync::Once = std::sync::Once::new();
+    SET_HOOK.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let mut message = info.to_string();
+            let stack = Reflect::get(&js_sys::Error::new(""), &JsValue::from_str("stack"))
+                .ok()
+                .and_then(|stack| stack.as_string());
+            if let Some(stack) = stack {
+                message.push_str("\n\nStack:\n\n");
+                message.push_str(&stack);
+            }
+            web_sys::console::error_1(&JsValue::from_str(&message));
+        }));
+    });
+}
+
+/// Width of this build's linear-memory addresses in bits: 32 for the wasm32
+/// package, 64 for the memory64 package.
+#[wasm_bindgen]
+pub fn memory_address_bits() -> u32 {
+    usize::BITS
 }
 
 #[cfg(test)]

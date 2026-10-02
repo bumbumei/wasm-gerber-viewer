@@ -9,7 +9,13 @@ use std::cell::Cell;
 use std::mem::take;
 
 pub(crate) const MAX_STEP_REPEAT_COPIES: usize = 100_000;
+// Keeps one layer's generated geometry inside a 32-bit address space. A
+// memory64 build can grow to 16 GiB instead of 4 GiB, so it allows four times
+// as many items.
+#[cfg(not(target_arch = "wasm64"))]
 pub(crate) const MAX_GENERATED_ITEMS: usize = 60_000_000;
+#[cfg(target_arch = "wasm64")]
+pub(crate) const MAX_GENERATED_ITEMS: usize = 240_000_000;
 
 /// Polarity - Dark (positive) or Clear (negative)
 #[derive(Clone, Copy, Debug, PartialEq)]

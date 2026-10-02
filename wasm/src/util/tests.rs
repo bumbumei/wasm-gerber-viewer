@@ -1,4 +1,21 @@
-use super::{format_bytes, format_count};
+use super::{checked_u32_len, format_bytes, format_count};
+
+#[test]
+fn u32_length_conversion_rejects_counts_beyond_the_u32_range() {
+    assert_eq!(checked_u32_len(0, "test array"), Ok(0));
+    assert_eq!(
+        checked_u32_len(u32::MAX as usize, "test array"),
+        Ok(u32::MAX)
+    );
+    #[cfg(target_pointer_width = "64")]
+    {
+        let message = checked_u32_len(u32::MAX as usize + 1, "test array").unwrap_err();
+        assert_eq!(
+            message,
+            "Gerber layer is too large: test array holds 4,294,967,296 values, exceeding the u32 range"
+        );
+    }
+}
 
 #[test]
 fn count_formatting_groups_digits_without_underflow() {

@@ -1,6 +1,7 @@
 use crate::geometry::{Boundary, PathRegions, PATH_SECTOR_VERTEX_FLOATS};
 use crate::parser::geometry::{offset_primitive_by, Primitive};
 use crate::parser::{Aperture, Polarity};
+use crate::util::checked_u32_len;
 use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -349,15 +350,16 @@ impl InteractionLayer {
                 feature.bounds.max_y(),
             ]);
 
-            feature_primitive_ranges.push(primitive_types.len() as u32);
+            let primitive_start = compact_usize(primitive_types.len(), "primitive range start")?;
+            feature_primitive_ranges.push(primitive_start);
             feature.primitives.append_compact_primitives(
                 &mut primitive_types,
                 &mut primitive_data,
                 &mut templates,
             );
             feature_primitive_ranges.push(
-                (primitive_types.len() as u32)
-                    .saturating_sub(*feature_primitive_ranges.last().unwrap_or(&0)),
+                compact_usize(primitive_types.len(), "primitive range end")?
+                    .saturating_sub(primitive_start),
             );
 
             if let Some(path_region) = feature.path_regions.as_deref() {
@@ -398,47 +400,51 @@ impl InteractionLayer {
         set_property(
             &object,
             "descriptorFields",
-            u32_array_to_js(&descriptors.fields),
+            u32_array_to_js(&descriptors.fields)?,
         )?;
         set_property(
             &object,
             "descriptorProperties",
-            f32_array_to_js(&descriptors.properties),
+            f32_array_to_js(&descriptors.properties)?,
         )?;
         set_property(
             &object,
             "featureDescriptors",
-            u32_array_to_js(&feature_descriptors),
+            u32_array_to_js(&feature_descriptors)?,
         )?;
-        set_property(&object, "featureBounds", f32_array_to_js(&feature_bounds))?;
+        set_property(&object, "featureBounds", f32_array_to_js(&feature_bounds)?)?;
         set_property(
             &object,
             "featurePrimitiveRanges",
-            u32_array_to_js(&feature_primitive_ranges),
+            u32_array_to_js(&feature_primitive_ranges)?,
         )?;
         set_property(
             &object,
             "featurePathRegionIds",
-            u32_array_to_js(&feature_path_region_ids),
+            u32_array_to_js(&feature_path_region_ids)?,
         )?;
         set_property(
             &object,
             "pathRegionRefFeatureIds",
-            u32_array_to_js(&path_region_ref_feature_ids),
+            u32_array_to_js(&path_region_ref_feature_ids)?,
         )?;
         set_property(
             &object,
             "pathRegionRefData",
-            u32_array_to_js(&path_region_ref_data),
+            u32_array_to_js(&path_region_ref_data)?,
         )?;
-        set_property(&object, "primitiveTypes", u32_array_to_js(&primitive_types))?;
-        set_property(&object, "primitiveData", f32_array_to_js(&primitive_data))?;
+        set_property(
+            &object,
+            "primitiveTypes",
+            u32_array_to_js(&primitive_types)?,
+        )?;
+        set_property(&object, "primitiveData", f32_array_to_js(&primitive_data)?)?;
         set_property(
             &object,
             "templateOffsets",
-            u32_array_to_js(&templates.offsets),
+            u32_array_to_js(&templates.offsets)?,
         )?;
-        set_property(&object, "templateData", f32_array_to_js(&templates.data))?;
+        set_property(&object, "templateData", f32_array_to_js(&templates.data)?)?;
         set_property(&object, "pathRegions", path_regions.into())?;
         Ok(object.into())
     }
@@ -881,6 +887,8 @@ impl CompactTemplateTable {
 
         let index = self.offsets.len().saturating_sub(1) as u32;
         self.data.extend_from_slice(template);
+        // A length past u32 cannot be serialized: `to_compact_js` rejects the
+        // table when it converts `data`, before these offsets are read.
         self.offsets.push(self.data.len() as u32);
         self.indexes.insert(key, index);
         index
@@ -2373,16 +2381,20 @@ fn normalize_angle(angle: f32) -> f32 {
     angle
 }
 
-fn f32_array_to_js(values: &[f32]) -> JsValue {
-    let array = Float32Array::new_with_length(values.len() as u32);
-    array.copy_from(values);
-    array.into()
+fn typed_array_length(len: usize) -> Result<u32, JsValue> {
+    checked_u32_len(len, "a picking data array").map_err(|message| JsValue::from_str(&message))
 }
 
-fn u32_array_to_js(values: &[u32]) -> JsValue {
-    let array = Uint32Array::new_with_length(values.len() as u32);
+fn f32_array_to_js(values: &[f32]) -> Result<JsValue, JsValue> {
+    let array = Float32Array::new_with_length(typed_array_length(values.len())?);
     array.copy_from(values);
-    array.into()
+    Ok(array.into())
+}
+
+fn u32_array_to_js(values: &[u32]) -> Result<JsValue, JsValue> {
+    let array = Uint32Array::new_with_length(typed_array_length(values.len())?);
+    array.copy_from(values);
+    Ok(array.into())
 }
 
 fn f32_array_from_js(value: &JsValue, key: &str) -> Vec<f32> {
@@ -2504,26 +2516,32 @@ fn path_region_to_compact_js(path_regions: &PathRegions) -> Result<JsValue, JsVa
             for point in contour {
                 pick_contour_points.extend_from_slice(point);
             }
-            pick_contour_point_offsets.push((pick_contour_points.len() / 2) as u32);
+            pick_contour_point_offsets.push(compact_usize(
+                pick_contour_points.len() / 2,
+                "pick contour point offset",
+            )?);
         }
-        pick_region_contour_offsets.push((pick_contour_point_offsets.len() - 1) as u32);
+        pick_region_contour_offsets.push(compact_usize(
+            pick_contour_point_offsets.len() - 1,
+            "pick region contour offset",
+        )?);
     }
 
     let object = Object::new();
     set_property(
         &object,
         "wedgeVertices",
-        f32_array_to_js(&path_regions.wedge_vertices),
+        f32_array_to_js(&path_regions.wedge_vertices)?,
     )?;
     set_property(
         &object,
         "wedgeVertexOffsets",
-        u32_array_to_js(&path_regions.wedge_vertex_offsets),
+        u32_array_to_js(&path_regions.wedge_vertex_offsets)?,
     )?;
     set_property(
         &object,
         "sectorVertices",
-        f32_array_to_js(&path_regions.sector_vertices),
+        f32_array_to_js(&path_regions.sector_vertices)?,
     )?;
     set_property(
         &object,
@@ -2533,32 +2551,32 @@ fn path_region_to_compact_js(path_regions: &PathRegions) -> Result<JsValue, JsVa
     set_property(
         &object,
         "sectorVertexOffsets",
-        u32_array_to_js(&path_regions.sector_vertex_offsets),
+        u32_array_to_js(&path_regions.sector_vertex_offsets)?,
     )?;
     set_property(
         &object,
         "coverVertices",
-        f32_array_to_js(&path_regions.cover_vertices),
+        f32_array_to_js(&path_regions.cover_vertices)?,
     )?;
     set_property(
         &object,
         "clearVertices",
-        f32_array_to_js(&path_regions.clear_vertices),
+        f32_array_to_js(&path_regions.clear_vertices)?,
     )?;
     set_property(
         &object,
         "pickRegionContourOffsets",
-        u32_array_to_js(&pick_region_contour_offsets),
+        u32_array_to_js(&pick_region_contour_offsets)?,
     )?;
     set_property(
         &object,
         "pickContourPointOffsets",
-        u32_array_to_js(&pick_contour_point_offsets),
+        u32_array_to_js(&pick_contour_point_offsets)?,
     )?;
     set_property(
         &object,
         "pickContourPoints",
-        f32_array_to_js(&pick_contour_points),
+        f32_array_to_js(&pick_contour_points)?,
     )?;
     Ok(object.into())
 }
@@ -2651,8 +2669,9 @@ fn validate_compact_pick_offsets_invariant(
         || contour_offsets.is_empty()
         || region_offsets.first().copied() != Some(0)
         || contour_offsets.first().copied() != Some(0)
-        || region_offsets.last().copied() != Some(contour_offsets.len().saturating_sub(1) as u32)
-        || contour_offsets.last().copied() != Some(point_count as u32)
+        || region_offsets.last().copied()
+            != u32::try_from(contour_offsets.len().saturating_sub(1)).ok()
+        || contour_offsets.last().copied() != u32::try_from(point_count).ok()
     {
         return Err("Invalid compact pick contour offsets");
     }

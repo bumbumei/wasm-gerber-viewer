@@ -16,7 +16,11 @@ use std::mem::size_of;
 use std::mem::take;
 use std::rc::Rc;
 
+// Scaled with the address space like `MAX_GENERATED_ITEMS`.
+#[cfg(not(target_arch = "wasm64"))]
 const MAX_GENERATED_ITEMS_PER_COMMAND: usize = 90_000_000;
+#[cfg(target_arch = "wasm64")]
+const MAX_GENERATED_ITEMS_PER_COMMAND: usize = 360_000_000;
 const PATH_WEDGE_VERTEX_FLOATS: usize = 6;
 const PATH_COVER_VERTEX_FLOATS: usize = 12;
 const PATH_SECTOR_QUAD_VERTICES: usize = 6;
@@ -2198,14 +2202,22 @@ fn append_path_region(
         )?);
     }
 
-    path_regions
-        .wedge_vertex_offsets
-        .push((path_regions.wedge_vertices.len() / 2) as u32);
-    path_regions
-        .sector_vertex_offsets
-        .push((path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS) as u32);
+    path_regions.wedge_vertex_offsets.push(path_vertex_offset(
+        path_regions.wedge_vertices.len() / 2,
+        "wedge",
+    )?);
+    path_regions.sector_vertex_offsets.push(path_vertex_offset(
+        path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS,
+        "sector",
+    )?);
 
     Ok(())
+}
+
+fn path_vertex_offset(vertex_count: usize, kind: &str) -> Result<u32, String> {
+    u32::try_from(vertex_count).map_err(|_| {
+        format!("Gerber region is too large to parse: path region {kind} vertex offsets exceed the u32 range")
+    })
 }
 
 fn append_region_source_contours(
