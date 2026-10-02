@@ -30,6 +30,7 @@
 
 - 面向大型 Gerber 文件（10 MB 以上）优化的高性能渲染
 - 基于 WASM 与 WebGL2 的硬件加速渲染
+- 在支持 WebAssembly memory64 的浏览器中可加载超过 4 GiB 的图层数据
 - 支持 RS-274X Gerber 渲染
 - 支持 NC drill 叠加渲染
 - 支持导入 ODB++ 作业（`.zip`、`.tgz`、`.tar.gz`、`.tar`）
@@ -101,6 +102,21 @@ rustup target add wasm32-unknown-unknown
 wasm-pack build wasm --target web --out-dir pkg --release
 ```
 
+### memory64 构建（可选）
+
+在支持 WebAssembly memory64 的浏览器中，查看器会为主实例加载 `wasm/pkg64`
+中的第二个构建。没有 `wasm/pkg64` 时，所有位置都使用 wasm32 构建。
+
+```bash
+./scripts/build-wasm64.sh
+```
+
+`wasm64-unknown-unknown` 没有预构建的标准库，因此脚本会安装固定日期的 nightly
+工具链和 `rust-src`，从源码构建 `std`，并运行与 `wasm/Cargo.lock` 版本一致的
+`wasm-bindgen` CLI。模块使用 binaryen 133 的 `wasm-opt` 优化；如果已安装的
+`wasm-opt` 不接受 memory64 模块（wasm-pack 自带的版本就是如此），脚本会自行
+下载。
+
 ## npm 包
 
 [wasm-gerber-renderer](packages/wasm-gerber-renderer/README.zh-Hans.md)
@@ -134,7 +150,8 @@ wasm-gerber-viewer/
 ├── wasm/
 │   ├── Cargo.toml                     # Rust crate manifest
 │   ├── README.md                      # Rust/WASM 管线说明
-│   ├── pkg/                           # 生成的 wasm-pack 输出
+│   ├── pkg/                           # 生成的 wasm-pack 输出（wasm32）
+│   ├── pkg64/                         # 生成的 memory64 构建（scripts/build-wasm64.sh）
 │   └── src/
 │       ├── lib.rs                     # WASM API 入口
 │       ├── tests.rs                   # crate 级测试
@@ -157,6 +174,17 @@ wasm-gerber-viewer/
 需要支持 WebGL2 的现代浏览器。
 
 - Chrome 96+, Firefox 114+, Safari 15.4+, Edge 96+
+
+### 超过 4 GiB 的内存
+
+在支持 WebAssembly memory64 的浏览器（Chrome 和 Edge 133+、Firefox 134+）中，
+保存所有已加载图层拾取数据的主实例会运行 memory64 构建，可以从 4 GiB 增长到约
+16 GiB。解析 worker 仍使用解析更快的 wasm32；只有当 wasm32 解析器因内存不足而
+失败时，该图层才会在 memory64 worker 中重新解析。Safari 和旧版浏览器与之前
+一样，全部运行 wasm32。
+
+在查看器 URL 后加上 `?wasm=32` 或 `?wasm=64`，可以让所有实例都运行同一个构建。
+单个文件 300 MiB 的限制以及 WebGL 对单个缓冲区的限制保持不变。
 
 ## 示例来源
 
