@@ -3,10 +3,12 @@ import test from "node:test";
 
 import {
   WASM32_LINEAR_MEMORY_LIMIT_BYTES,
+  WASM32_PICKING_INDEX_RESERVE_CUTOFF_BYTES,
   WASM64_LINEAR_MEMORY_LIMIT_BYTES,
   WASM_VARIANT_32,
   WASM_VARIANT_64,
   getLinearMemoryLimitBytes,
+  getPickingIndexReserveBytes,
   getRequestedWasmVariant,
   getWasmAddressBits,
   resolveWasmVariantPlan,
@@ -67,6 +69,71 @@ test("a device with little RAM keeps a memory64 instance within it", () => {
   // Never below what the wasm32 build is allowed.
   assert.equal(getLinearMemoryLimitBytes(64, 2), WASM32_LINEAR_MEMORY_LIMIT_BYTES);
   assert.equal(getLinearMemoryLimitBytes(64, 0.5), WASM32_LINEAR_MEMORY_LIMIT_BYTES);
+});
+
+test("a picking index reserves a multiple of its payload on both builds", () => {
+  const payloadBytes = 100 * MIB;
+  assert.equal(
+    getPickingIndexReserveBytes({ addressBits: 32, payloadBytes, memoryBytes: 64 * MIB }),
+    150 * MIB,
+  );
+  assert.equal(
+    getPickingIndexReserveBytes({ addressBits: 64, payloadBytes, memoryBytes: 64 * MIB }),
+    175 * MIB,
+  );
+  // A package built before memory_address_bits() existed counts as wasm32.
+  assert.equal(
+    getPickingIndexReserveBytes({ addressBits: undefined, payloadBytes, memoryBytes: null }),
+    150 * MIB,
+  );
+});
+
+test("small picking indexes are not worth a reservation", () => {
+  for (const addressBits of [32, 64]) {
+    assert.equal(
+      getPickingIndexReserveBytes({ addressBits, payloadBytes: 0, memoryBytes: 0 }),
+      0,
+    );
+    assert.equal(
+      getPickingIndexReserveBytes({ addressBits, payloadBytes: MIB / 4, memoryBytes: 0 }),
+      0,
+    );
+    assert.equal(
+      getPickingIndexReserveBytes({ addressBits, payloadBytes: Number.NaN, memoryBytes: 0 }),
+      0,
+    );
+  }
+});
+
+test("a wasm32 instance stops reserving once that would take it past 2 GiB", () => {
+  assert.equal(WASM32_PICKING_INDEX_RESERVE_CUTOFF_BYTES, 2 * GIB);
+  const payloadBytes = 100 * MIB;
+  const reserveBytes = 150 * MIB;
+  assert.equal(
+    getPickingIndexReserveBytes({
+      addressBits: 32,
+      payloadBytes,
+      memoryBytes: 2 * GIB - reserveBytes,
+    }),
+    reserveBytes,
+  );
+  assert.equal(
+    getPickingIndexReserveBytes({
+      addressBits: 32,
+      payloadBytes,
+      memoryBytes: 2 * GIB - reserveBytes + 1,
+    }),
+    0,
+  );
+  assert.equal(
+    getPickingIndexReserveBytes({ addressBits: 32, payloadBytes, memoryBytes: 3 * GIB }),
+    0,
+  );
+  // memory64 has the room, and its largest layers gain the most.
+  assert.equal(
+    getPickingIndexReserveBytes({ addressBits: 64, payloadBytes, memoryBytes: 12 * GIB }),
+    175 * MIB,
+  );
 });
 
 test("the address width comes from the loaded package", () => {

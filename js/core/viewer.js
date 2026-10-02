@@ -3,6 +3,7 @@ import {
   WASM_VARIANT_32,
   WASM_VARIANT_64,
   getLinearMemoryLimitBytes,
+  getPickingIndexReserveBytes,
   getRequestedWasmVariant,
   getWasmAddressBits,
   loadWasmPackage,
@@ -73,13 +74,6 @@ const MAX_PARSE_WORKERS = 4;
 const BYTES_PER_MIB = 1024 * 1024;
 const RECYCLE_PARSE_WORKER_MEMORY_BYTES = 256 * BYTES_PER_MIB;
 const RECYCLE_PARSE_WORKER_GROWTH_BYTES = 128 * BYTES_PER_MIB;
-// A memory64 instance needs 2.1 to 2.8 times a compact interaction payload's
-// size to build the picking index from it (measured on flash, track and region
-// layers). Reserving a little under the top of that range leaves the last
-// tenth of a flash-heavy index to grow step by step, and in exchange keeps
-// almost none of the reservation unused.
-const PICKING_INDEX_BYTES_PER_PAYLOAD_BYTE = 2.5;
-const MIN_PICKING_INDEX_RESERVE_BYTES = BYTES_PER_MIB;
 const ARC_TESSELLATION_QUALITY_LEVELS = {
   low: 0,
   normal: 1,
@@ -5085,22 +5079,22 @@ export class GerberViewer {
   }
 
   /**
-   * Grows a memory64 main instance once for the picking index about to be
-   * built. The index is made of many small allocations, each of which would
-   * otherwise grow the memory by a page or two; on memory64 those grows cost
-   * several times the build itself.
+   * Grows the main instance once for the picking index about to be built.
+   * The index is made of many small allocations, each of which would
+   * otherwise grow the memory by a page or two, and those grows cost more
+   * than the build itself, several times more on memory64.
    */
   reservePickingIndexMemory(interactionPayload) {
-    if (
-      this.wasmAddressBits !== 64 ||
-      typeof this.wasmModule?.reserve_input_capacity !== "function"
-    ) {
+    if (typeof this.wasmModule?.reserve_input_capacity !== "function") {
       return;
     }
 
-    const reserveBytes =
-      getTypedArrayBytes(interactionPayload) * PICKING_INDEX_BYTES_PER_PAYLOAD_BYTE;
-    if (reserveBytes < MIN_PICKING_INDEX_RESERVE_BYTES) {
+    const reserveBytes = getPickingIndexReserveBytes({
+      addressBits: this.wasmAddressBits,
+      payloadBytes: getTypedArrayBytes(interactionPayload),
+      memoryBytes: this.getWasmLinearMemoryBytes(),
+    });
+    if (reserveBytes === 0) {
       return;
     }
     try {
