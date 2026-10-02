@@ -191,6 +191,11 @@ Add `?wasm=32` or `?wasm=64` to the viewer URL to run every instance on one
 build. The 300 MiB limit per file and the WebGL limits on a single buffer are
 unchanged.
 
+`demo/memory64-test-pads-24M.gbr` is a sample that exercises this: a 15 KiB
+file that expands to 24 million pads and leaves the main instance at about
+5 GiB. Loading it takes most of a 16 GiB machine's RAM and fails on wasm32.
+`node scripts/generate-memory64-sample.mjs [million pads]` writes other sizes.
+
 ## Source
 
 Sample archives are loaded from their upstream sources and are not bundled in
