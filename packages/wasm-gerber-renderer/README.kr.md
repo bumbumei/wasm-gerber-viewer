@@ -17,6 +17,8 @@
 - Gerber 파일, TAR archive, ODB++ `.zip`/`.tar`/`.tgz`/`.tar.gz` job을 PNG로 렌더링하는 `gerber-renderer` CLI
 - 패키징 과정에서 생성되어 함께 포함되는 `wasm-bindgen` 출력물
 
+포함된 모듈은 wasm32 빌드이므로 렌더러 하나가 쓸 수 있는 WASM 메모리는 최대 4 GiB입니다. 웹 뷰어가 메인 인스턴스용으로 불러오는 memory64 빌드는 이 패키지에 들어 있지 않습니다.
+
 브라우저 진입점은 호출자가 제공한 WebGL2 canvas를 사용합니다. Node.js 진입점은 같은 WASM/WebGL 렌더러를 사용하며, 기본 네이티브 WebGL2 context 제공자로 [`node-gles-webgl2`](https://github.com/dsafdsaf132/node-gles-webgl2)를 사용합니다.
 
 ## 목차

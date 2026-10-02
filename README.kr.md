@@ -30,6 +30,7 @@ PCB 시각화를 위한 WASM/WebGL2 기반 Gerber 파일 뷰어입니다.
 
 - 대형 Gerber 파일(10 MB 이상)을 빠르게 렌더링
 - WASM과 WebGL2를 이용한 하드웨어 가속 렌더링
+- WebAssembly memory64 지원 브라우저에서 4 GiB를 넘는 레이어 데이터 로드
 - RS-274X Gerber 렌더링 지원
 - NC drill 오버레이 렌더링 지원
 - ODB++ 잡 가져오기 지원 (`.zip`, `.tgz`, `.tar.gz`, `.tar`)
@@ -101,6 +102,23 @@ rustup target add wasm32-unknown-unknown
 wasm-pack build wasm --target web --out-dir pkg --release
 ```
 
+### memory64 빌드 (선택)
+
+WebAssembly memory64를 지원하는 브라우저에서는 뷰어가 메인 인스턴스용으로
+`wasm/pkg64`의 두 번째 빌드를 불러옵니다. `wasm/pkg64`가 없으면 모든 곳에서
+wasm32 빌드를 사용합니다.
+
+```bash
+./scripts/build-wasm64.sh
+```
+
+`wasm64-unknown-unknown`은 미리 빌드된 표준 라이브러리가 없으므로, 스크립트가
+날짜를 고정한 nightly 툴체인과 `rust-src`를 설치해 `std`를 소스에서 빌드하고
+`wasm/Cargo.lock`과 버전이 맞는 `wasm-bindgen` CLI를 실행합니다. 모듈은
+binaryen 133의 `wasm-opt`로 최적화하며, 설치된 `wasm-opt`가 memory64 모듈을
+받아들이지 못하면(wasm-pack에 포함된 버전이 그렇습니다) 스크립트가 직접
+내려받습니다.
+
 ## npm 패키지
 
 [wasm-gerber-renderer](packages/wasm-gerber-renderer/README.kr.md)
@@ -134,7 +152,8 @@ wasm-gerber-viewer/
 ├── wasm/
 │   ├── Cargo.toml                     # Rust crate manifest
 │   ├── README.md                      # Rust/WASM 파이프라인 설명
-│   ├── pkg/                           # 생성된 wasm-pack 출력
+│   ├── pkg/                           # 생성된 wasm-pack 출력 (wasm32)
+│   ├── pkg64/                         # 생성된 memory64 빌드 (scripts/build-wasm64.sh)
 │   └── src/
 │       ├── lib.rs                     # WASM API 진입점
 │       ├── tests.rs                   # crate 단위 테스트
@@ -158,6 +177,18 @@ WebGL2와 WebAssembly SIMD를 지원하는 최신 브라우저가 필요합니�
 
 - Chrome 96+, Firefox 114+, Safari 16.4+, Edge 96+
 - iOS Chrome: iOS 16.4+ (WebKit을 사용하므로 iOS 버전에 따라 지원 여부가 결정됩니다.)
+
+### 4 GiB를 넘는 메모리
+
+WebAssembly memory64를 지원하는 브라우저(Chrome·Edge 133+, Firefox 134+)에서는
+로드한 모든 레이어의 picking 데이터를 보관하는 메인 인스턴스가 memory64 빌드로
+실행되어 4 GiB 대신 약 16 GiB까지 커질 수 있습니다. 파싱 워커는 파싱이 더 빠른
+wasm32를 그대로 쓰고, wasm32 파서가 메모리 부족으로 실패한 레이어만 memory64
+워커에서 다시 파싱합니다. Safari와 구형 브라우저는 이전과 같이 전부 wasm32로
+동작합니다.
+
+뷰어 URL에 `?wasm=32` 또는 `?wasm=64`를 붙이면 모든 인스턴스가 한 빌드로
+실행됩니다. 파일당 300 MiB 제한과 단일 버퍼에 대한 WebGL 제한은 그대로입니다.
 
 ## 출처
 
