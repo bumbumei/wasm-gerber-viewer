@@ -186,6 +186,11 @@ wasm-gerber-viewer/
 在查看器 URL 后加上 `?wasm=32` 或 `?wasm=64`，可以让所有实例都运行同一个构建。
 单个文件 300 MiB 的限制以及 WebGL 对单个缓冲区的限制保持不变。
 
+`demo/memory64-test-pads-24M.gbr` 是用于验证该行为的示例：15 KiB 的文件会展开为
+2400 万个焊盘，加载后主实例约占 5 GiB。加载它需要 16 GiB 机器的大部分内存，
+并且在 wasm32 下会失败。可用
+`node scripts/generate-memory64-sample.mjs [焊盘数（百万）]` 生成其他大小。
+
 ## 示例来源
 
 示例压缩包从各自的上游项目加载，不包含在本仓库中。
