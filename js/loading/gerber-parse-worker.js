@@ -1,6 +1,9 @@
+import { WASM_VARIANT_32, loadWasmPackage } from "../core/wasm-variant.js";
+
 const WASM_INPUT_RESERVE_MARGIN_BYTES = 1024 * 1024;
 
 let wasmModulePromise = null;
+let wasmModuleVariant = null;
 let wasmExports = null;
 
 function getWorkerWasmMemoryBytes() {
@@ -56,15 +59,38 @@ function isWorkerUnavailableErrorMessage(message) {
   );
 }
 
-async function getWasmModule() {
-  if (!wasmModulePromise) {
-    wasmModulePromise = import("../../wasm/pkg/wasm_gerber_processor.js").then(
-      async (wasmModule) => {
-        wasmExports = await wasmModule.default();
-        wasmModule.init_panic_hook?.();
-        return wasmModule;
-      },
+// Whether more address space could fix this failure, in which case the pool
+// may parse the layer again in a memory64 worker. A trap is how an allocation
+// the module cannot recover from surfaces, and a RangeError is the engine
+// refusing an output array. A count past u32 fails on any build.
+function isMemoryExhaustionError(error, message) {
+  if (/u32 range/i.test(message)) {
+    return false;
+  }
+  return (
+    (typeof WebAssembly !== "undefined" &&
+      error instanceof WebAssembly.RuntimeError) ||
+    error instanceof RangeError ||
+    /not enough (webassembly )?memory|too large to (parse|render)|supported limit of \d+ items|per-command limit|out of memory/i.test(
+      message,
+    )
+  );
+}
+
+// A worker serves one build for its whole life; the pool creates a separate
+// worker for the memory64 retry.
+async function getWasmModule(variant = WASM_VARIANT_32) {
+  if (wasmModulePromise && wasmModuleVariant !== variant) {
+    throw new Error(
+      `Parse worker already loaded the ${wasmModuleVariant} build, not ${variant}`,
     );
+  }
+  if (!wasmModulePromise) {
+    wasmModuleVariant = variant;
+    wasmModulePromise = loadWasmPackage(variant).then((loaded) => {
+      wasmExports = loaded.wasmExports;
+      return loaded.wasmModule;
+    });
   }
 
   return wasmModulePromise;
@@ -113,12 +139,13 @@ self.addEventListener("message", async (event) => {
     preserveArcRegions = true,
     arcTessellationQuality = 1,
     interactionsEnabled = false,
+    wasmVariant = WASM_VARIANT_32,
   } = event.data ?? {};
   let content = event.data?.content;
   let beforeBytes = null;
 
   try {
-    const wasmModule = await getWasmModule();
+    const wasmModule = await getWasmModule(wasmVariant);
     if (typeof wasmModule.parse_gerber_layer !== "function") {
       throw new Error("Parse worker API unavailable: parse_gerber_layer is missing");
     }
@@ -215,6 +242,7 @@ self.addEventListener("message", async (event) => {
       ok: false,
       error: errorMessage,
       workerUnavailable: isWorkerUnavailableErrorMessage(errorMessage),
+      memoryExhausted: isMemoryExhaustionError(error, errorMessage),
       workerMemory: {
         beforeBytes,
         afterBytes: getWorkerWasmMemoryBytes(),

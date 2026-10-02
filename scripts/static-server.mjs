@@ -4,6 +4,12 @@ import { extname, isAbsolute, join, normalize, relative, resolve, sep } from "no
 
 const root = resolve(process.cwd());
 const port = Number(process.env.GERBER_VIEWER_TEST_PORT ?? 4173);
+// "32" or "64": adds ?wasm= to viewer page requests that do not choose a build
+// themselves, so specs that open "/" run on one build (js/core/wasm-variant.js).
+const pinnedWasmVariant = process.env.GERBER_VIEWER_TEST_WASM ?? "";
+// Directory under wasm/ served in place of wasm/pkg, e.g. "pkg64" to run the
+// specs that import /wasm/pkg/ in the page against the memory64 binary.
+const wasmPackageDir = process.env.GERBER_VIEWER_TEST_WASM_PKG_DIR ?? "";
 const mimeTypes = new Map([
   [".css", "text/css; charset=utf-8"],
   [".html", "text/html; charset=utf-8"],
@@ -21,7 +27,10 @@ const mimeTypes = new Map([
 
 function resolveRequestPath(requestUrl) {
   const pathname = decodeURIComponent(new URL(requestUrl, "http://localhost").pathname);
-  const relativePath = pathname === "/" ? "index.html" : pathname.slice(1);
+  let relativePath = pathname === "/" ? "index.html" : pathname.slice(1);
+  if (wasmPackageDir && relativePath.startsWith("wasm/pkg/")) {
+    relativePath = `wasm/${wasmPackageDir}/${relativePath.slice("wasm/pkg/".length)}`;
+  }
   const candidate = resolve(join(root, normalize(relativePath)));
   const relativeCandidate = relative(root, candidate);
   const escapesRoot =
@@ -29,7 +38,21 @@ function resolveRequestPath(requestUrl) {
   return escapesRoot ? null : candidate;
 }
 
+function pinnedWasmVariantRedirect(requestUrl) {
+  if (!pinnedWasmVariant) return null;
+  const url = new URL(requestUrl, "http://localhost");
+  const isViewerPage = url.pathname === "/" || url.pathname === "/index.html";
+  if (!isViewerPage || url.searchParams.has("wasm")) return null;
+  url.searchParams.set("wasm", pinnedWasmVariant);
+  return `${url.pathname}${url.search}`;
+}
+
 const server = createServer((request, response) => {
+  const redirect = pinnedWasmVariantRedirect(request.url ?? "/");
+  if (redirect) {
+    response.writeHead(302, { "Cache-Control": "no-store", Location: redirect }).end();
+    return;
+  }
   const path = resolveRequestPath(request.url ?? "/");
   if (!path) {
     response.writeHead(403).end("Forbidden");
