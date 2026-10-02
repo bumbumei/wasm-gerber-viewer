@@ -9,3 +9,6 @@ playwright.config.* linguist-detectable=false
 # Build, CI, and maintenance scripts
 scripts/** linguist-detectable=false
 packages/*/scripts/** linguist-detectable=false
+
+# Runs under Git Bash on Windows as well, where CRLF line endings break it
+scripts/build-wasm64.sh text eol=lf
