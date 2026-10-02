@@ -74,9 +74,21 @@ jobs:
       - name: Build or reuse WASM package
         run: ./scripts/vercel-build.sh
 
+      - name: Cache memory64 WASM package
+        uses: actions/cache@v4
+        with:
+          path: wasm/pkg64
+          key: ${{ runner.os }}-wasm-pkg64-release-${{ hashFiles('scripts/build-wasm64.sh', 'wasm/Cargo.lock', 'wasm/Cargo.toml', 'wasm/src/**') }}
+
+      - name: Build or reuse memory64 WASM package
+        run: ./scripts/build-wasm64.sh
+
       - name: Check JavaScript syntax
         run: |
           find js -type f -name '*.js' -print0 | sort -z | xargs -0 -n1 node --check
+
+      - name: Check WASM build selection
+        run: node --test tests/wasm-variant.test.mjs
 
       - name: Check renderer package and viewer helpers
         # Run only the flaky lifecycle test separately below; all other failures stay blocking.
@@ -139,6 +151,15 @@ jobs:
           include-hidden-files: true
           retention-days: 14
 
+      - name: Upload memory64 WASM package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-pkg64
+          path: wasm/pkg64/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
+
   pages:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -163,6 +184,12 @@ jobs:
           name: wasm-pkg
           path: wasm/pkg
 
+      - name: Download memory64 WASM package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-pkg64
+          path: wasm/pkg64
+
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
@@ -176,6 +203,7 @@ jobs:
           cp index.html "${pages_dir}/"
           cp -R css demo js vendor "${pages_dir}/"
           cp -R wasm/pkg "${pages_dir}/wasm/pkg"
+          cp -R wasm/pkg64 "${pages_dir}/wasm/pkg64"
 
           {
             echo "### GitHub Pages artifact"
@@ -233,6 +261,12 @@ jobs:
         with:
           name: wasm-pkg
           path: wasm/pkg
+
+      - name: Download memory64 WASM package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-pkg64
+          path: wasm/pkg64
 
       - name: Check Vercel secrets
         id: vercel-secrets
