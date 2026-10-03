@@ -65,6 +65,39 @@ export class NotificationCenter {
     });
   }
 
+  /**
+   * Explains that the data needs more than wasm32's 4 GiB: `lead` says why,
+   * `items` (if any) lists what to do, and `note` follows the list.
+   */
+  showMemoryLimitNotice({ title, lead, items = [], note = "", duration }) {
+    this.show(
+      title,
+      "danger",
+      (messageElement) => {
+        const leadElement = document.createElement("p");
+        leadElement.textContent = lead;
+        messageElement.appendChild(leadElement);
+
+        if (items.length > 0) {
+          const list = document.createElement("ul");
+          for (const text of items) {
+            const item = document.createElement("li");
+            item.textContent = text;
+            list.appendChild(item);
+          }
+          messageElement.appendChild(list);
+        }
+
+        if (note) {
+          const noteElement = document.createElement("p");
+          noteElement.textContent = note;
+          messageElement.appendChild(noteElement);
+        }
+      },
+      duration,
+    );
+  }
+
   hide() {
     if (this.timeout !== null) {
       clearTimeout(this.timeout);
