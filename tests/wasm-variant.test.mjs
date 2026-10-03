@@ -2,15 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  MEMORY64_BROWSERS,
   WASM32_LINEAR_MEMORY_LIMIT_BYTES,
   WASM32_PICKING_INDEX_RESERVE_CUTOFF_BYTES,
   WASM64_LINEAR_MEMORY_LIMIT_BYTES,
   WASM_VARIANT_32,
   WASM_VARIANT_64,
+  exceedsWasm32Memory,
   getLinearMemoryLimitBytes,
   getPickingIndexReserveBytes,
   getRequestedWasmVariant,
   getWasmAddressBits,
+  isMemoryExhaustionError,
+  isOutOfMemoryMessage,
   resolveWasmVariantPlan,
 } from "../js/core/wasm-variant.js";
 
@@ -133,6 +137,72 @@ test("a wasm32 instance stops reserving once that would take it past 2 GiB", () 
   assert.equal(
     getPickingIndexReserveBytes({ addressBits: 64, payloadBytes, memoryBytes: 12 * GIB }),
     175 * MIB,
+  );
+});
+
+test("memory64 browsers are listed with the first version that supports it", () => {
+  assert.deepEqual(
+    MEMORY64_BROWSERS.map(({ name, version }) => `${name} ${version}`),
+    ["Chrome 133", "Edge 133", "Firefox 134"],
+  );
+  assert.ok(Object.isFrozen(MEMORY64_BROWSERS));
+});
+
+test("out-of-memory messages from the module and the viewer are recognised", () => {
+  for (const message of [
+    "Not enough WebAssembly memory to load file input (300.0 MB)",
+    "Gerber layer is too large to parse: not enough memory for primitives",
+    "Gerber region is too large to render: not enough memory for region points",
+    "Gerber generated geometry exceeds the supported limit of 60000000 items while processing flash",
+    "Gerber flash expands to 95000000 items, exceeding the per-command limit of 90000000",
+    "WASM memory limit reached",
+    "RangeError: Array buffer allocation failed",
+  ]) {
+    assert.equal(isOutOfMemoryMessage(message), true, message);
+  }
+  for (const message of [
+    "File does not contain valid Gerber data (no geometry found)",
+    "Gerber step-repeat count 200000 exceeds the supported limit of 100000",
+    "unreachable",
+    undefined,
+  ]) {
+    assert.equal(isOutOfMemoryMessage(message), false, String(message));
+  }
+});
+
+test("any trap may be worth a memory64 retry, but a u32 overflow never is", () => {
+  assert.equal(isMemoryExhaustionError(new WebAssembly.RuntimeError("unreachable")), true);
+  assert.equal(isMemoryExhaustionError(new RangeError("Invalid array length")), true);
+  assert.equal(isMemoryExhaustionError(new Error("no geometry found")), false);
+  assert.equal(
+    isMemoryExhaustionError(
+      new Error("Gerber region is too large to parse: path region wedge vertex offsets exceed the u32 range"),
+    ),
+    false,
+  );
+});
+
+test("only a memory message or a trap in a large instance means wasm32 is too small", () => {
+  assert.equal(exceedsWasm32Memory({ message: "WASM memory limit reached" }), true);
+  assert.equal(
+    exceedsWasm32Memory({ message: "unreachable", trapped: true, memoryBytes: GIB }),
+    true,
+  );
+  // A trap in a small instance points at a bug, not at the data's size.
+  assert.equal(
+    exceedsWasm32Memory({ message: "unreachable", trapped: true, memoryBytes: GIB - 1 }),
+    false,
+  );
+  assert.equal(
+    exceedsWasm32Memory({ message: "unreachable", trapped: false, memoryBytes: 3 * GIB }),
+    false,
+  );
+  assert.equal(
+    exceedsWasm32Memory({
+      message: "Gerber layer is too large: a parsed geometry array holds 4,294,967,296 values, exceeding the u32 range",
+      trapped: false,
+    }),
+    false,
   );
 });
 

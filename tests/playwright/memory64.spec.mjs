@@ -274,7 +274,128 @@ test("the wasm32 main instance still refuses layers once its memory is nearly fu
   ]);
   await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
   await expect(page.locator(".gerber-layer-item")).toHaveCount(0);
+  // This browser has memory64; only the address keeps it off.
+  await expectNotice(page, "More than 4 GiB needed", [
+    "needs more than 4 GiB of memory, but ?wasm=32 in the address",
+    "Remove it to use memory64.",
+  ]);
   expect(await diagnosticsText(page)).toContain("WASM memory limit reached");
+});
+
+const notice = (page) => page.locator("#file-size-warning");
+
+async function expectNotice(page, title, texts) {
+  await expect(notice(page)).toBeVisible();
+  await expect(page.locator("#warning-title")).toHaveText(title);
+  for (const text of texts) {
+    await expect(page.locator("#warning-message")).toContainText(text);
+  }
+}
+
+const SUPPORTED_BROWSER_LIST = [
+  "Chrome 133 or later",
+  "Edge 133 or later",
+  "Firefox 134 or later",
+  "Safari does not support it yet.",
+];
+
+test("a browser without memory64 lists the supported browsers when a layer needs more than 4 GiB", async ({ page }) => {
+  await hideMemory64(page);
+  await failWasm32Parser(page);
+  await page.goto("/");
+  await expectBuilds(page, "wasm32", "wasm32");
+  await page.locator("#file-input").setInputFiles([
+    gerber("exhausted.gtl", padSource("WASM32-OUT-OF-MEMORY")),
+    gerber("pad.gbl", padSource()),
+  ]);
+  await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+  await expect(page.locator(".gerber-layer-item")).toHaveCount(1);
+  await expectNotice(page, "Unsupported browser", [
+    "exhausted.gtl needs more than the 4 GiB of memory this browser gives WebAssembly",
+    ...SUPPORTED_BROWSER_LIST,
+  ]);
+  await expect(page.locator("#warning-message li")).toHaveText([
+    "Chrome 133 or later",
+    "Edge 133 or later",
+    "Firefox 134 or later",
+  ]);
+  expect(await diagnosticsText(page)).toContain("not enough memory");
+});
+
+test("the notice also covers a single file parsed on the main instance", async ({ page }) => {
+  await hideMemory64(page);
+  await failWasm32Parser(page);
+  const watched = watchPage(page);
+  await page.goto("/");
+  await page.locator("#file-input").setInputFiles(
+    gerber("exhausted.gtl", padSource("WASM32-OUT-OF-MEMORY")),
+  );
+  await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+  // No worker: wasm32 parses a single file on the main instance.
+  expect(watched.binaries).toEqual([WASM32_BINARY]);
+  await expectNotice(page, "Unsupported browser", [
+    "exhausted.gtl needs more than the 4 GiB",
+    ...SUPPORTED_BROWSER_LIST,
+  ]);
+});
+
+test("a trap counts as running out of memory only once the instance is large", async ({ page }) => {
+  await hideMemory64(page);
+  await failWasm32Parser(page);
+  await page.goto("/");
+  await page.locator("#file-input").setInputFiles([
+    gerber("grown.gtl", padSource("WASM32-TRAP-LARGE")),
+    gerber("pad.gbl", padSource()),
+  ]);
+  await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+  await expectNotice(page, "Unsupported browser", ["grown.gtl needs more than the 4 GiB"]);
+
+  // The same trap in a worker that is still small reads as a bug.
+  await page.goto("/");
+  await page.locator("#file-input").setInputFiles([
+    gerber("trapped.gtl", padSource("WASM32-TRAP")),
+    gerber("pad.gbl", padSource()),
+  ]);
+  await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+  // Every notification is also logged, so the log shows which one appeared.
+  const diagnostics = await diagnosticsText(page);
+  expect(diagnostics).toContain("Failed to load file trapped.gtl: unreachable");
+  expect(diagnostics).not.toContain("Unsupported browser");
+});
+
+test("a browser without memory64 shows the notice when the main instance is full", async ({ page }) => {
+  await hideMemory64(page);
+  await page.goto("/");
+  await expectBuilds(page, "wasm32", "wasm32");
+  await page.evaluate(async () => {
+    const main = await import("/wasm/pkg/wasm_gerber_processor.js");
+    const { memory } = await main.default();
+    const targetPages = (3600 * 2 ** 20) / 65536;
+    memory.grow(targetPages - memory.buffer.byteLength / 65536);
+  });
+  await page.locator("#file-input").setInputFiles([
+    gerber("first.gtl", padSource()),
+    gerber("second.gbl", padSource()),
+  ]);
+  await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+  await expect(page.locator(".gerber-layer-item")).toHaveCount(0);
+  await expectNotice(page, "Unsupported browser", SUPPORTED_BROWSER_LIST);
+});
+
+test("a missing memory64 build asks for a reload instead of another browser", async ({ page }) => {
+  await page.route("**/wasm/pkg64/**", (route) => route.fulfill({ status: 404, body: "Not found" }));
+  await failWasm32Parser(page);
+  await page.goto("/");
+  await expectBuilds(page, "wasm32", "wasm32");
+  await page.locator("#file-input").setInputFiles([
+    gerber("exhausted.gtl", padSource("WASM32-OUT-OF-MEMORY")),
+    gerber("pad.gbl", padSource()),
+  ]);
+  await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+  await expectNotice(page, "More than 4 GiB needed", [
+    "the memory64 build could not be loaded. Reload the page to try again.",
+  ]);
+  await expect(page.locator("#warning-message li")).toHaveCount(0);
 });
 
 // Serves the wasm32 glue to the workers with a parser that fails the way an
@@ -295,6 +416,12 @@ async function failWasm32Parser(page) {
             throw new Error(
               "Gerber layer is too large to parse: not enough memory for primitives (forced)",
             );
+          }
+          if (content.includes("WASM32-TRAP-LARGE")) {
+            // Trap only after the instance has grown the way a real
+            // allocation failure leaves it.
+            real.reserve_input_capacity(1.25 * 2 ** 30);
+            throw new WebAssembly.RuntimeError("unreachable (forced)");
           }
           if (content.includes("WASM32-TRAP")) {
             throw new WebAssembly.RuntimeError("unreachable (forced)");
@@ -397,6 +524,8 @@ test("a layer that fails on both builds reports both failures", async ({ page })
   const diagnostics = await diagnosticsText(page);
   expect(diagnostics).toContain("no geometry found");
   expect(diagnostics).toContain("wasm64 retry after wasm32 failed");
+  // memory64 was there and could not help, so no browser advice.
+  await expect(page.locator("#warning-title")).not.toHaveText(/Unsupported browser|More than 4 GiB/);
 });
 
 test("with every instance on wasm32 a memory failure is final", async ({ page }) => {
@@ -410,5 +539,8 @@ test("with every instance on wasm32 a memory failure is final", async ({ page })
   await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
   await expect(page.locator(".gerber-layer-item")).toHaveCount(1);
   expect(watched.binaries.every((path) => path === WASM32_BINARY)).toBe(true);
+  await expectNotice(page, "More than 4 GiB needed", [
+    "exhausted.gtl needs more than 4 GiB of memory, but ?wasm=32 in the address",
+  ]);
   expect(await diagnosticsText(page)).toContain("not enough memory");
 });
