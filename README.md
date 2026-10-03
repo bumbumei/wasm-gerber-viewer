@@ -10,6 +10,29 @@
 - 미러: https://dsafdsaf132.github.io/wasm-gerber-viewer/
 - 저장소: https://github.com/dsafdsaf132/wasm-gerber-viewer
 
+## 지원 브라우저
+
+| 브라우저 | 동작 방식 | 메인 인스턴스 메모리 한도 |
+|-|-|-|
+| Chrome·Edge 133 이상 (Windows, macOS, Linux, Android) | 혼합: 메인 memory64, 파싱 워커 wasm32 | 약 15.5 GiB |
+| Firefox 134 이상 (데스크톱, Android) | 혼합 | 약 15.5 GiB |
+| Chrome·Edge 96–132, Firefox 114–133 | wasm32 | 약 3.5 GiB |
+| Safari 15.4 이상 (macOS) | wasm32 | 약 3.5 GiB |
+| iPhone·iPad의 모든 브라우저 | wasm32 (모두 Safari 엔진) | 약 3.5 GiB, 실제로는 iOS가 그 전에 탭을 종료할 수 있음 |
+| WebGL2를 지원하지 않는 브라우저 | 동작하지 않음 | — |
+
+- memory64 지원 버전은 MDN 호환성 데이터(`webassembly.memory64`) 기준입니다. Chromium 133 이상을
+  쓰는 다른 브라우저(Opera, Samsung Internet 등)도 혼합 방식으로 동작합니다. Safari는 아직
+  Technology Preview에서만 지원합니다.
+- wasm32 쪽 최소 버전은 업스트림이 밝힌 WebGL2 요구 사항(Chrome·Edge 96, Firefox 114, Safari 15.4)
+  그대로입니다.
+- 메모리 한도는 뷰어가 레이어를 더 받지 않는 지점입니다(4 GiB·16 GiB 엔진 상한에서 512 MiB 여유).
+  실제로는 기기 RAM이 먼저 한계가 될 수 있고, `navigator.deviceMemory`가 8 GiB 미만으로 보고되는
+  기기에서는 memory64 한도도 그 값으로 낮춥니다.
+- wasm32로 동작하는 브라우저에서 4 GiB가 넘게 필요한 파일을 열면, 지원되지 않는 브라우저라는
+  안내와 위 목록을 보여 줍니다. `?wasm=32` 또는 `?wasm=64`를 주소에 붙이면 모든 인스턴스를 한
+  빌드로 고정할 수 있습니다.
+
 ## memory64 검증용 샘플
 
 - [패드 2,400만 개 샘플 열기](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fbumbumei.github.io%2Fwasm-gerber-viewer%2Fdemo%2Fmemory64-test-pads-24M.gbr)
@@ -97,6 +120,9 @@ To use the viewer, go to the upstream project:
 [viewer](https://wasm-gerber-viewer.vercel.app/) ·
 [repository](https://github.com/dsafdsaf132/wasm-gerber-viewer).
 The memory64 sample above needs Chrome or Edge 133+, or Firefox 134+.
+Supported browsers: Chrome and Edge 133+ and Firefox 134+ (desktop and Android) run the
+memory64 main instance (up to about 15.5 GiB); older Chrome, Edge and Firefox with WebGL2,
+Safari 15.4+ and every browser on iPhone and iPad run wasm32 (up to about 3.5 GiB).
 Measured against upstream `a147e04` (tables above; Intel Iris Xe, Chromium 151, medians
 of 7): the default mixed setup keeps upstream's parse time, loads four layers about 20%
 faster and uses about a third more main-instance memory; drawing time is unchanged.
