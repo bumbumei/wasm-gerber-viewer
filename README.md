@@ -18,6 +18,77 @@
   브라우저에서는 열리지 않습니다.
 - 로드하는 동안 16 GiB 장비 RAM의 대부분을 씁니다.
 
+## 업스트림 대비 측정
+
+이 브랜치의 세 가지 동작 방식을 업스트림과 같은 조건에서 비교했습니다.
+
+| 구성 | 설명 |
+|-|-|
+| 업스트림 | dsafdsaf132/wasm-gerber-viewer `a147e04`, wasm32 빌드 하나 |
+| wasm32 | 이 브랜치를 memory64 미지원 브라우저(Safari)에서, 또는 `?wasm=32`로 열었을 때 |
+| wasm64 | `?wasm=64`: 메인 인스턴스와 파싱 워커 모두 memory64 |
+| 혼합 | memory64 지원 브라우저의 기본값: 메인 인스턴스 memory64, 파싱 워커 wasm32 |
+
+- 환경: Intel Iris Xe 노트북(Direct3D 11), Windows 11, Chromium 151. 값은 모두 7회 측정의 중앙값입니다.
+- 데이터: 생성한 Gerber 레이어 4개(flash 40만 개 7.7 MiB, track 30만 개 5.9 MiB,
+  다각형 region 2만 개 15.9 MiB, pad 20만 개 3.8 MiB)와 drill 파일 1개.
+- 재현: `WASM_BENCHMARK_UPSTREAM_DIR=<업스트림 체크아웃> node scripts/benchmark-wasm-variants.mjs`
+
+### 로딩 시간 (ms, 파일 선택부터 로딩 창이 닫힐 때까지)
+
+| 작업 | 업스트림 | wasm32 | wasm64 | 혼합 |
+|-|-:|-:|-:|-:|
+| 레이어 4개 (병렬 파싱) | 1881 | 1463 | 1700 | 1513 |
+| 레이어 1개 | 1139 | 1159 | 1301 | 1120 |
+| 레이어 4개 + drill (순차 파싱) | 3141 | 3129 | 3689 | 3198 |
+
+### 그리기 시간 (ms, 로드한 화면 한 프레임을 GPU가 끝낼 때까지)
+
+| 화면 | 업스트림 | wasm32 | wasm64 | 혼합 |
+|-|-:|-:|-:|-:|
+| 레이어 4개 | 12.1 | 12.1 | 12.1 | 12.1 |
+| 레이어 1개 | 2.4 | 2.4 | 2.4 | 2.3 |
+
+### 메모리 사용량 (MiB, WebAssembly 선형 메모리)
+
+| 항목 | 업스트림 | wasm32 | wasm64 | 혼합 |
+|-|-:|-:|-:|-:|
+| 메인 인스턴스, 레이어 4개 | 195 | 222 | 260 | 260 |
+| 메인 인스턴스, 레이어 1개 | 130 | 130 | 146 | 71 |
+| 메인 인스턴스, 레이어 4개 + drill | 253 | 253 | 303 | 260 |
+| 파싱 워커 하나의 최대, 레이어 4개 | 210 | 210 | 207 | 210 |
+
+레이어 1개일 때 혼합 구성은 파싱을 wasm32 워커(최대 129 MiB)에서 하므로 메인 인스턴스가 작습니다.
+
+### 파서 단독 (ms, 같은 파일을 한 인스턴스에서 반복 파싱)
+
+| 파일 | 업스트림 | wasm32 | wasm64 |
+|-|-:|-:|-:|
+| flash 40만 개 | 554 | 567 | 717 |
+| track 30만 개 | 423 | 425 | 535 |
+| region 2만 개 | 710 | 705 | 830 |
+| pad 20만 개 | 270 | 293 | 359 |
+
+### 4 GiB를 넘는 샘플 (`memory64-test-pads-24M.gbr`)
+
+| | 업스트림 | wasm32 | 혼합 |
+|-|-|-|-|
+| 결과 | 10초 후 실패 (`unreachable`) | 실패 (`unreachable`) | 37초에 로드, picking 정상 |
+| 메인 인스턴스 메모리 | 3.23 GiB (실패 시점) | 3.23 GiB (실패 시점) | 5.13 GiB |
+
+`?wasm=64`로는 이 샘플을 재지 않았습니다.
+
+### 요약
+
+- **혼합(기본값)**: 파싱 워커 시간은 업스트림과 같습니다(레이어 4개 합계 3057 ms 대 3072 ms).
+  레이어 4개 로드는 업스트림보다 20% 빠릅니다. picking 인덱스를 만들기 전에 메모리를 한 번에
+  예약해, 업스트림에서 574 ms 걸리던 인덱스 구축이 218 ms로 줄었기 때문입니다. 메인 인스턴스
+  메모리는 33% 더 씁니다(64비트 포인터와 예약 여유분).
+- **wasm32(Safari 등)**: 같은 예약으로 레이어 4개 로드가 22% 빠르고, 메인 메모리는 14% 늘었습니다.
+  4 GiB 한도는 업스트림과 같습니다.
+- **wasm64 전부**: 파서가 17–33% 느려 로드가 업스트림보다 느려질 수 있어서 기본값으로 쓰지 않습니다.
+- **그리기**: 네 구성이 같습니다. 그리기 시간은 GPU가 결정합니다.
+
 ---
 
 **English.** This fork is a development branch for validating WebAssembly memory64
@@ -26,3 +97,6 @@ To use the viewer, go to the upstream project:
 [viewer](https://wasm-gerber-viewer.vercel.app/) ·
 [repository](https://github.com/dsafdsaf132/wasm-gerber-viewer).
 The memory64 sample above needs Chrome or Edge 133+, or Firefox 134+.
+Measured against upstream `a147e04` (tables above; Intel Iris Xe, Chromium 151, medians
+of 7): the default mixed setup keeps upstream's parse time, loads four layers about 20%
+faster and uses about a third more main-instance memory; drawing time is unchanged.
