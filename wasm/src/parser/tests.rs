@@ -3154,3 +3154,219 @@ D10*X000000Y000000D03*X010000Y000000D03*M02*";
     assert_eq!(layers.len(), 1);
     assert_eq!(layers[0].circles.x.len(), 2);
 }
+
+type ProgressReports = std::rc::Rc<std::cell::RefCell<Vec<(super::ParseStage, usize, usize)>>>;
+
+fn parse_with_progress(data: &str) -> (Vec<GerberData>, Vec<(super::ParseStage, usize, usize)>) {
+    let reports = ProgressReports::default();
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let sink = reports.clone();
+    parser.progress = Some(Box::new(move |stage, done, total| {
+        sink.borrow_mut().push((stage, done, total));
+    }));
+    let layers = parser
+        .parse(data)
+        .expect("progress test layer should parse");
+    let reports = reports.borrow().clone();
+    (layers, reports)
+}
+
+fn stage_reports(
+    reports: &[(super::ParseStage, usize, usize)],
+    stage: super::ParseStage,
+) -> Vec<(usize, usize)> {
+    reports
+        .iter()
+        .filter(|(reported, _, _)| *reported == stage)
+        .map(|&(_, done, total)| (done, total))
+        .collect()
+}
+
+#[test]
+fn progress_counts_commands_then_shapes_and_ends_complete() {
+    let flashes = 200_000;
+    let mut data = String::from("%FSLAX24Y24*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\n");
+    for index in 0..flashes {
+        data.push_str(&format!(
+            "X{}Y{}D03*\n",
+            index % 1000 * 100,
+            index / 1000 * 100
+        ));
+    }
+    data.push_str("M02*");
+
+    let (layers, reports) = parse_with_progress(&data);
+    assert_eq!(layers[0].circles.x.len(), flashes);
+
+    let commands = stage_reports(&reports, super::ParseStage::Commands);
+    let total = data.len();
+    assert_eq!(commands.first(), Some(&(0, total)));
+    assert_eq!(commands.last(), Some(&(total, total)));
+    assert!(
+        commands.len() >= 4,
+        "{} bytes should report at least every {} bytes: {commands:?}",
+        total,
+        super::PROGRESS_BYTE_STEP
+    );
+    assert!(commands.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+
+    let geometry = stage_reports(&reports, super::ParseStage::Geometry);
+    assert_eq!(geometry.first(), Some(&(0, flashes)));
+    assert_eq!(geometry.last(), Some(&(flashes, flashes)));
+    let first_geometry = reports
+        .iter()
+        .position(|(stage, _, _)| *stage == super::ParseStage::Geometry)
+        .unwrap();
+    assert!(
+        reports[first_geometry..]
+            .iter()
+            .all(|(stage, _, _)| *stage == super::ParseStage::Geometry),
+        "geometry follows the commands"
+    );
+}
+
+#[test]
+fn step_repeat_flashes_report_progress_within_few_commands() {
+    // 100 flashes stepped 100 x 100 times: a million shapes from a file of
+    // about a kilobyte, far less than the byte step.
+    let mut data =
+        String::from("%FSLAX24Y24*%\n%MOMM*%\n%ADD10C,0.01*%\n%SRX100Y100I1.0J1.0*%\nD10*\n");
+    for index in 0..100 {
+        data.push_str(&format!("X{}Y0D03*\n", index * 50));
+    }
+    data.push_str("%SR*%\nM02*");
+
+    let (layers, reports) = parse_with_progress(&data);
+    let shapes: usize = layers.iter().map(|layer| layer.circles.x.len()).sum();
+    assert_eq!(shapes, 1_000_000);
+
+    let commands = stage_reports(&reports, super::ParseStage::Commands);
+    let total = commands[0].1;
+    assert!(total < super::PROGRESS_BYTE_STEP);
+    let intermediate = commands
+        .iter()
+        .filter(|&&(done, _)| done > 0 && done < total)
+        .count();
+    assert!(
+        intermediate >= 3,
+        "one report per {} shapes expected: {commands:?}",
+        super::PROGRESS_SHAPE_STEP
+    );
+
+    let geometry = stage_reports(&reports, super::ParseStage::Geometry);
+    assert_eq!(geometry.first(), Some(&(0, shapes)));
+    assert_eq!(geometry.last(), Some(&(shapes, shapes)));
+}
+
+#[test]
+fn a_parse_without_a_progress_callback_matches_one_with_it() {
+    let data = "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,0.5*%
+%LPD*%
+D10*
+X000000Y000000D03*
+%LPC*%
+X000000Y000000D03*
+%LPD*%
+X010000Y000000D03*
+M02*";
+    let (with_progress, reports) = parse_with_progress(data);
+    let without_progress = parse_gerber_payload_with_options(data, true, 1)
+        .expect("layer should parse")
+        .render_layers;
+
+    assert_eq!(with_progress.len(), without_progress.len());
+    for (left, right) in with_progress.iter().zip(&without_progress) {
+        assert_eq!(left.circles.x, right.circles.x);
+        assert_eq!(left.is_negative, right.is_negative);
+    }
+    // Three polarity layers of one shape each: far less than a step.
+    assert_eq!(
+        stage_reports(&reports, super::ParseStage::Geometry),
+        vec![(0, 3), (3, 3)]
+    );
+}
+
+#[test]
+fn render_buffers_report_between_polarity_layers_a_step_of_shapes_apart() {
+    let per_layer = 300_000;
+    assert!(per_layer > super::PROGRESS_SHAPE_STEP && per_layer < 2 * super::PROGRESS_SHAPE_STEP);
+    let mut data = String::from(
+        "%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,0.1*%
+D10*
+",
+    );
+    let flashes = |data: &mut String, count: usize| {
+        for index in 0..count {
+            data.push_str(&format!(
+                "X{}Y{}D03*
+",
+                index % 1000 * 100,
+                index / 1000 * 100
+            ));
+        }
+    };
+    flashes(&mut data, per_layer);
+    data.push_str(
+        "%LPC*%
+",
+    );
+    flashes(&mut data, 1);
+    data.push_str(
+        "%LPD*%
+",
+    );
+    flashes(&mut data, per_layer);
+    data.push_str("M02*");
+
+    let (_, reports) = parse_with_progress(&data);
+    let total = 2 * per_layer + 1;
+    // The one-flash layer in the middle adds too little to report.
+    assert_eq!(
+        stage_reports(&reports, super::ParseStage::Geometry),
+        vec![(0, total), (per_layer, total), (total, total)]
+    );
+}
+
+#[test]
+fn polarity_layers_without_shapes_report_nothing() {
+    // Arc regions stay path regions, so these three polarity layers hold no
+    // shapes to count.
+    let mut data = String::from(
+        "%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,0.1*%
+D10*
+G75*
+",
+    );
+    for (index, polarity) in ["%LPD*%", "%LPC*%", "%LPD*%"].iter().enumerate() {
+        let x = index * 30_000;
+        data.push_str(&format!(
+            "{polarity}
+G36*
+X{}Y0D02*
+G03*
+X{}Y0I-10000J0D01*
+G01*
+X{}Y0D01*
+G37*
+",
+            x + 20_000,
+            x,
+            x + 20_000
+        ));
+    }
+    data.push_str("M02*");
+
+    let (layers, reports) = parse_with_progress(&data);
+    assert!(layers.len() >= 3);
+    assert_eq!(
+        stage_reports(&reports, super::ParseStage::Geometry),
+        vec![(0, 0)]
+    );
+}

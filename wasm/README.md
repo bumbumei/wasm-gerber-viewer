@@ -83,6 +83,10 @@ Key APIs:
   payloads.
 - `parse_gerber_layer_payload_with_options()`: parses Gerber once and returns
   both the render payload and a compact interaction payload.
+- `parse_gerber_layer_payload_with_progress()`: the same parse, calling
+  `on_progress(stage, done, total)` while it works (`"commands"` in bytes of
+  the file read, `"geometry"` in shapes, then `"packing"`); it can also skip
+  the interaction payload.
 - `parse_drill_layer()`: parses Excellon/NC drill input into outline/fill
   payloads.
 - `decompress_unix_z()`: decompresses an ODB++ `.Z` member within the caller's
@@ -105,8 +109,10 @@ Gerber parsing starts in `wasm/src/parser/mod.rs`.
 Important functions:
 
 - `parse_gerber_with_options(content, preserve_arc_regions, arc_tessellation_quality)`
-- `parse_gerber_payload_with_options(...)`
-- public wrapper `parse_gerber_layer_payload_with_options(...)`
+- `parse_gerber_payload_with_progress(...)`, which takes an optional
+  progress callback
+- public wrappers `parse_gerber_layer_payload_with_options(...)` and
+  `parse_gerber_layer_payload_with_progress(...)`
 - `GerberParser`
 
 The parser processes the file in object-stream order and emits polarity

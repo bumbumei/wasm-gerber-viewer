@@ -16,7 +16,9 @@ use crate::drill::{
 };
 use crate::geometry::{gerber_data_layers_from_js, gerber_data_layers_to_js, Boundary, GerberData};
 use crate::interaction::InteractionLayer;
-use crate::parser::{parse_gerber_payload_with_options, GerberParser, ParsedGerberLayer};
+use crate::parser::{
+    parse_gerber_payload_with_progress, GerberParser, ParseProgress, ParseStage, ParsedGerberLayer,
+};
 use crate::renderer::Renderer;
 use crate::util::format_bytes;
 use js_sys::{Object, Reflect, Uint32Array};
@@ -119,13 +121,20 @@ fn parse_layer_payload_data(
     offset_y: f32,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
+    collect_interactions: bool,
+    progress: Option<ParseProgress>,
 ) -> Result<ParsedGerberLayer, JsValue> {
     if !offset_x.is_finite() || !offset_y.is_finite() {
         return Err(JsValue::from_str("Layer offset must be finite"));
     }
 
-    let mut payload =
-        parse_gerber_payload_with_options(content, preserve_arc_regions, arc_tessellation_quality)?;
+    let mut payload = parse_gerber_payload_with_progress(
+        content,
+        preserve_arc_regions,
+        arc_tessellation_quality,
+        collect_interactions,
+        progress,
+    )?;
 
     if offset_x != 0.0 || offset_y != 0.0 {
         for layer in &mut payload.render_layers {
@@ -190,8 +199,54 @@ pub fn parse_gerber_layer_payload_with_options(
         offset_y,
         preserve_arc_regions,
         arc_tessellation_quality,
+        true,
+        None,
     )?;
+    parsed_layer_payload_to_js(payload)
+}
 
+/// `parse_gerber_layer_payload_with_options` that calls
+/// `on_progress(stage, done, total)` while it works: `"commands"` counts the
+/// bytes of the file read, `"geometry"` the parsed shapes that have become
+/// render buffers, a polarity layer at a time, and `"packing"` (0 of 1) starts
+/// the copy of the result into JS.
+/// What the callback throws is ignored. Without `collect_interactions` the
+/// result has no picking data (`interactionPayload` is null).
+#[wasm_bindgen]
+pub fn parse_gerber_layer_payload_with_progress(
+    content: String,
+    offset_x: f32,
+    offset_y: f32,
+    preserve_arc_regions: bool,
+    arc_tessellation_quality: u32,
+    collect_interactions: bool,
+    on_progress: js_sys::Function,
+) -> Result<JsValue, JsValue> {
+    let report = move |stage: &str, done: usize, total: usize| {
+        let _ = on_progress.call3(
+            &JsValue::NULL,
+            &JsValue::from_str(stage),
+            &JsValue::from_f64(done as f64),
+            &JsValue::from_f64(total as f64),
+        );
+    };
+    let parse_report = report.clone();
+    let payload = parse_layer_payload_data(
+        &content,
+        offset_x,
+        offset_y,
+        preserve_arc_regions,
+        arc_tessellation_quality,
+        collect_interactions,
+        Some(Box::new(move |stage: ParseStage, done, total| {
+            parse_report(stage.as_str(), done, total)
+        })),
+    )?;
+    report("packing", 0, 1);
+    parsed_layer_payload_to_js(payload)
+}
+
+fn parsed_layer_payload_to_js(payload: ParsedGerberLayer) -> Result<JsValue, JsValue> {
     let object = Object::new();
     Reflect::set(
         &object,
@@ -655,6 +710,8 @@ impl GerberProcessor {
                 0.0,
                 self.preserve_arc_regions,
                 self.arc_tessellation_quality,
+                true,
+                None,
             )?;
             return self.add_parsed_layer_payload(payload);
         }
@@ -692,6 +749,8 @@ impl GerberProcessor {
                 offset_y,
                 self.preserve_arc_regions,
                 self.arc_tessellation_quality,
+                true,
+                None,
             )?;
             return self.add_parsed_layer_payload(payload);
         }
@@ -1428,6 +1487,8 @@ impl GerberProcessor {
             offset_y,
             self.preserve_arc_regions,
             self.arc_tessellation_quality,
+            true,
+            None,
         )?;
         self.set_interaction_layer(layer_id as usize, payload.interaction_layer);
         Ok(())
