@@ -70,8 +70,15 @@ function watchPage(page) {
   return watched;
 }
 
-async function loadFiles(page, files, layerCount = files.length) {
+// The viewer listens for files once its main WASM instance is up, which it
+// marks on <html>; files chosen before that are ignored.
+async function uploadFiles(page, files) {
+  await expect(page.locator("html")).toHaveAttribute("data-wasm-main", /^wasm/);
   await page.locator("#file-input").setInputFiles(files);
+}
+
+async function loadFiles(page, files, layerCount = files.length) {
+  await uploadFiles(page, files);
   await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
   await expect(page.locator(".gerber-layer-item, .drill-layer-item")).toHaveCount(layerCount);
 }
@@ -268,7 +275,7 @@ test("the wasm32 main instance still refuses layers once its memory is nearly fu
     const targetPages = (3600 * 2 ** 20) / 65536;
     memory.grow(targetPages - memory.buffer.byteLength / 65536);
   });
-  await page.locator("#file-input").setInputFiles([
+  await uploadFiles(page, [
     gerber("first.gtl", padSource()),
     gerber("second.gbl", padSource()),
   ]);
@@ -304,7 +311,7 @@ test("a browser without memory64 lists the supported browsers when a layer needs
   await failWasm32Parser(page);
   await page.goto("/");
   await expectBuilds(page, "wasm32", "wasm32");
-  await page.locator("#file-input").setInputFiles([
+  await uploadFiles(page, [
     gerber("exhausted.gtl", padSource("WASM32-OUT-OF-MEMORY")),
     gerber("pad.gbl", padSource()),
   ]);
@@ -327,9 +334,7 @@ test("the notice also covers a single file parsed on the main instance", async (
   await failWasm32Parser(page);
   const watched = watchPage(page);
   await page.goto("/");
-  await page.locator("#file-input").setInputFiles(
-    gerber("exhausted.gtl", padSource("WASM32-OUT-OF-MEMORY")),
-  );
+  await uploadFiles(page, gerber("exhausted.gtl", padSource("WASM32-OUT-OF-MEMORY")));
   await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
   // No worker: wasm32 parses a single file on the main instance.
   expect(watched.binaries).toEqual([WASM32_BINARY]);
@@ -343,7 +348,7 @@ test("a trap counts as running out of memory only once the instance is large", a
   await hideMemory64(page);
   await failWasm32Parser(page);
   await page.goto("/");
-  await page.locator("#file-input").setInputFiles([
+  await uploadFiles(page, [
     gerber("grown.gtl", padSource("WASM32-TRAP-LARGE")),
     gerber("pad.gbl", padSource()),
   ]);
@@ -352,7 +357,7 @@ test("a trap counts as running out of memory only once the instance is large", a
 
   // The same trap in a worker that is still small reads as a bug.
   await page.goto("/");
-  await page.locator("#file-input").setInputFiles([
+  await uploadFiles(page, [
     gerber("trapped.gtl", padSource("WASM32-TRAP")),
     gerber("pad.gbl", padSource()),
   ]);
@@ -373,7 +378,7 @@ test("a browser without memory64 shows the notice when the main instance is full
     const targetPages = (3600 * 2 ** 20) / 65536;
     memory.grow(targetPages - memory.buffer.byteLength / 65536);
   });
-  await page.locator("#file-input").setInputFiles([
+  await uploadFiles(page, [
     gerber("first.gtl", padSource()),
     gerber("second.gbl", padSource()),
   ]);
@@ -387,7 +392,7 @@ test("a missing memory64 build asks for a reload instead of another browser", as
   await failWasm32Parser(page);
   await page.goto("/");
   await expectBuilds(page, "wasm32", "wasm32");
-  await page.locator("#file-input").setInputFiles([
+  await uploadFiles(page, [
     gerber("exhausted.gtl", padSource("WASM32-OUT-OF-MEMORY")),
     gerber("pad.gbl", padSource()),
   ]);
@@ -586,6 +591,10 @@ async function failWasm32Parser(page) {
             );
           }
         }
+        export function parse_gerber_layer_payload_with_progress(content, ...rest) {
+          fail(content);
+          return real.parse_gerber_layer_payload_with_progress(content, ...rest);
+        }
         export function parse_gerber_layer_payload_with_options(content, ...rest) {
           fail(content);
           return real.parse_gerber_layer_payload_with_options(content, ...rest);
@@ -639,6 +648,24 @@ test("a layer the wasm32 worker runs out of memory on is parsed again by a memor
   await expect(page.locator("#bounds-readout")).toContainText("D10");
 });
 
+test("the loading modal says when memory64 parses a layer again", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__loadingStages = [];
+    new MutationObserver(() => {
+      const stage = document.getElementById("loading-stage")?.textContent;
+      if (stage && window.__loadingStages.at(-1) !== stage) {
+        window.__loadingStages.push(stage);
+      }
+    }).observe(document, { subtree: true, childList: true, characterData: true });
+  });
+  await failWasm32Parser(page);
+  await loadAndCapture(page, "", [gerber("exhausted.gtl", padSource("WASM32-OUT-OF-MEMORY"))]);
+  const stages = await page.evaluate(() => window.__loadingStages);
+  const retry = stages.indexOf("Parsing again with memory64");
+  expect(retry, stages.join(" > ")).toBeGreaterThan(stages.indexOf("Parsing"));
+  expect(stages.indexOf("Rendering")).toBeGreaterThan(retry);
+});
+
 test("the memory64 retry also covers the single-worker path that drill files force", async ({ page }) => {
   await failWasm32Parser(page);
   const { watched } = await loadAndCapture(page, "", [
@@ -656,7 +683,7 @@ test("the memory64 retry also covers the single-worker path that drill files for
 test("errors that more memory cannot fix are not retried on memory64", async ({ page }) => {
   const watched = watchPage(page);
   await page.goto("/");
-  await page.locator("#file-input").setInputFiles([
+  await uploadFiles(page, [
     gerber("empty.gtl", "%FSLAX24Y24*%\n%MOMM*%\nM02*"),
     gerber("pad.gbl", padSource()),
   ]);
@@ -669,7 +696,7 @@ test("errors that more memory cannot fix are not retried on memory64", async ({ 
 test("a layer that fails on both builds reports both failures", async ({ page }) => {
   await failWasm32Parser(page);
   await page.goto("/");
-  await page.locator("#file-input").setInputFiles([
+  await uploadFiles(page, [
     gerber("broken.gtl", "%FSLAX24Y24*%\n%MOMM*%\nG04 WASM32-OUT-OF-MEMORY*\nM02*"),
     gerber("pad.gbl", padSource()),
   ]);
@@ -686,7 +713,7 @@ test("with every instance on wasm32 a memory failure is final", async ({ page })
   await failWasm32Parser(page);
   const watched = watchPage(page);
   await page.goto("/?wasm=32");
-  await page.locator("#file-input").setInputFiles([
+  await uploadFiles(page, [
     gerber("exhausted.gtl", padSource("WASM32-OUT-OF-MEMORY")),
     gerber("pad.gbl", padSource()),
   ]);
