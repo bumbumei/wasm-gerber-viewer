@@ -597,6 +597,10 @@ async function failWasm32Parser(page) {
             throw "Gerber generated geometry exceeds the supported limit of 60000000 items while processing flash (forced)";
           }
         }
+        export function parse_gerber_layer_payload_with_progress(content, ...rest) {
+          fail(content);
+          return real.parse_gerber_layer_payload_with_progress(content, ...rest);
+        }
         export function parse_gerber_layer_payload_with_options(content, ...rest) {
           fail(content);
           return real.parse_gerber_layer_payload_with_options(content, ...rest);
@@ -648,6 +652,24 @@ test("a layer the wasm32 worker runs out of memory on is parsed again by a memor
   const box = await page.locator("#gerber-canvas").boundingBox();
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
   await expect(page.locator("#bounds-readout")).toContainText("D10");
+});
+
+test("the loading modal says when memory64 parses a layer again", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__loadingStages = [];
+    new MutationObserver(() => {
+      const stage = document.getElementById("loading-stage")?.textContent;
+      if (stage && window.__loadingStages.at(-1) !== stage) {
+        window.__loadingStages.push(stage);
+      }
+    }).observe(document, { subtree: true, childList: true, characterData: true });
+  });
+  await failWasm32Parser(page);
+  await loadAndCapture(page, "", [gerber("exhausted.gtl", padSource("WASM32-OUT-OF-MEMORY"))]);
+  const stages = await page.evaluate(() => window.__loadingStages);
+  const retry = stages.indexOf("Parsing again with memory64");
+  expect(retry, stages.join(" > ")).toBeGreaterThan(stages.indexOf("Parsing"));
+  expect(stages.indexOf("Rendering")).toBeGreaterThan(retry);
 });
 
 test("the memory64 retry also covers the single-worker path that drill files force", async ({ page }) => {

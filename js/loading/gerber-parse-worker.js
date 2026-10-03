@@ -5,6 +5,9 @@ import {
 } from "../core/wasm-variant.js";
 
 const WASM_INPUT_RESERVE_MARGIN_BYTES = 1024 * 1024;
+// The parser reports many times a second on a large layer; the loading modal
+// needs a few updates a second.
+const PROGRESS_POST_INTERVAL_MS = 100;
 
 let wasmModulePromise = null;
 let wasmModuleVariant = null;
@@ -91,6 +94,29 @@ function reserveWasmInputCapacity(wasmModule, content) {
   wasmModule.reserve_input_capacity(byteLength + WASM_INPUT_RESERVE_MARGIN_BYTES);
 }
 
+/**
+ * Callback for the parser's progress reports. It posts `{ id, progress }`
+ * messages while the parse runs: the first and last report of every stage,
+ * and in between at most one every PROGRESS_POST_INTERVAL_MS.
+ */
+function createProgressPoster(id) {
+  let lastStage = null;
+  let lastPostedAt = -Infinity;
+  return (stage, done, total) => {
+    const now = performance.now();
+    if (
+      stage === lastStage &&
+      done < total &&
+      now - lastPostedAt < PROGRESS_POST_INTERVAL_MS
+    ) {
+      return;
+    }
+    lastStage = stage;
+    lastPostedAt = now;
+    self.postMessage({ id, progress: { stage, done, total } });
+  };
+}
+
 function collectTransferables(value, transferables = [], seen = new Set()) {
   if (!value || typeof value !== "object" || seen.has(value)) {
     return transferables;
@@ -141,6 +167,8 @@ self.addEventListener("message", async (event) => {
     const offsetX = Number(offset.x ?? 0);
     const offsetY = Number(offset.y ?? 0);
 
+    const supportsProgress =
+      typeof wasmModule.parse_gerber_layer_payload_with_progress === "function";
     const supportsInteractionPayload =
       interactionsEnabled &&
       typeof wasmModule.parse_gerber_layer_payload_with_options === "function";
@@ -155,48 +183,59 @@ self.addEventListener("message", async (event) => {
     const supportsArcQuality =
       typeof wasmModule.parse_gerber_layer_with_options === "function" &&
       wasmModule.parse_gerber_layer_with_options.length >= 5;
-    const parseLayer = supportsInteractionPayload
-      ? () =>
-          wasmModule.parse_gerber_layer_payload_with_options(
-            content,
-            offsetX,
-            offsetY,
-            Boolean(preserveArcRegions),
-            normalizedQuality,
-          )
-      : typeof wasmModule.parse_gerber_layer_with_options === "function"
-        ? () => {
-            if (
-              !supportsArcQuality &&
-              !preserveArcRegions &&
-              normalizedQuality !== 1
-            ) {
-              throw new Error(
-                "Parse worker requires an updated WASM module for arc tessellation quality",
-              );
-            }
-            return wasmModule.parse_gerber_layer_with_options(
-              content,
-              offsetX,
-              offsetY,
-              Boolean(preserveArcRegions),
-              normalizedQuality,
-            );
-          }
-        : () => {
-            if (!preserveArcRegions) {
-              throw new Error(
-                "Parse worker requires an updated WASM module for region arc options",
-              );
-            }
-            return wasmModule.parse_gerber_layer(content, offsetX, offsetY);
-          };
+    const returnsPayload = supportsProgress || supportsInteractionPayload;
+    const parseLayer = () => {
+      if (supportsProgress) {
+        return wasmModule.parse_gerber_layer_payload_with_progress(
+          content,
+          offsetX,
+          offsetY,
+          Boolean(preserveArcRegions),
+          normalizedQuality,
+          Boolean(interactionsEnabled),
+          createProgressPoster(id),
+        );
+      }
+      if (supportsInteractionPayload) {
+        return wasmModule.parse_gerber_layer_payload_with_options(
+          content,
+          offsetX,
+          offsetY,
+          Boolean(preserveArcRegions),
+          normalizedQuality,
+        );
+      }
+      if (typeof wasmModule.parse_gerber_layer_with_options === "function") {
+        if (
+          !supportsArcQuality &&
+          !preserveArcRegions &&
+          normalizedQuality !== 1
+        ) {
+          throw new Error(
+            "Parse worker requires an updated WASM module for arc tessellation quality",
+          );
+        }
+        return wasmModule.parse_gerber_layer_with_options(
+          content,
+          offsetX,
+          offsetY,
+          Boolean(preserveArcRegions),
+          normalizedQuality,
+        );
+      }
+      if (!preserveArcRegions) {
+        throw new Error(
+          "Parse worker requires an updated WASM module for region arc options",
+        );
+      }
+      return wasmModule.parse_gerber_layer(content, offsetX, offsetY);
+    };
     const parsedResult = parseLayer();
-    const parsedLayer = supportsInteractionPayload
+    const parsedLayer = returnsPayload
       ? parsedResult.renderPayload
       : parsedResult;
-    const interactionPayload = supportsInteractionPayload
-      ? parsedResult.interactionPayload
+    const interactionPayload = returnsPayload
+      ? (parsedResult.interactionPayload ?? null)
       : null;
     const transferables = collectTransferables({
       parsedLayer,

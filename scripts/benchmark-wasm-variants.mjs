@@ -183,7 +183,8 @@ function installViewerProbes() {
       };
       this.addEventListener("message", (event) => {
         const start = started.get(event.data?.id);
-        if (!start) return;
+        // Progress reports arrive before the task's result.
+        if (!start || event.data.progress) return;
         bench.tasks.push({
           ms: performance.now() - start.at,
           variant: start.variant,
