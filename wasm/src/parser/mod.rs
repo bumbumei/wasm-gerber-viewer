@@ -42,6 +42,45 @@ pub struct ParsedGerberLayer {
     pub interaction_layer: Option<InteractionLayer>,
 }
 
+/// Part of a parse that a progress callback hears about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParseStage {
+    /// Running the file's commands; the counts are bytes of the file read.
+    Commands,
+    /// Building render buffers from the parsed shapes; the counts are shapes.
+    Geometry,
+}
+
+impl ParseStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ParseStage::Commands => "commands",
+            ParseStage::Geometry => "geometry",
+        }
+    }
+}
+
+/// Called with a stage, the work of that stage done so far, and its total.
+pub type ParseProgress = Box<dyn FnMut(ParseStage, usize, usize)>;
+
+// A parse reports after reading this many bytes, or sooner once the commands
+// since the last report produced this many shapes: a flash inside a
+// step-and-repeat block can turn one command into thousands. Either way a
+// report costs little next to the work between two of them.
+const PROGRESS_BYTE_STEP: usize = 1 << 20;
+const PROGRESS_SHAPE_STEP: usize = 1 << 18;
+
+fn report_progress(
+    progress: &mut Option<ParseProgress>,
+    stage: ParseStage,
+    done: usize,
+    total: usize,
+) {
+    if let Some(progress) = progress {
+        progress(stage, done, total);
+    }
+}
+
 /// Iterator over the commands of a Gerber file.
 ///
 /// The Gerber format delimits commands with `*`; line breaks carry no meaning,
@@ -1025,6 +1064,7 @@ pub struct GerberParser {
     pub current_path_regions: PathRegions,
     pub region_contours: Vec<RegionContour>, // Contours collected in Region mode
     pub interaction_layer: Option<InteractionLayer>,
+    pub progress: Option<ParseProgress>,
 }
 
 impl GerberParser {
@@ -1049,6 +1089,7 @@ impl GerberParser {
             current_path_regions: PathRegions::empty(),
             region_contours: Vec::new(),
             interaction_layer: collect_interactions.then(InteractionLayer::new),
+            progress: None,
         }
     }
 
@@ -1064,8 +1105,30 @@ impl GerberParser {
         }
 
         let mut commands_iter = split_commands(data);
+        let total_bytes = data.len();
+        report_progress(&mut self.progress, ParseStage::Commands, 0, total_bytes);
+        let mut reported_bytes = 0;
+        let mut reported_shapes = 0;
 
         while let Some(raw_line) = commands_iter.next() {
+            if let Some(progress) = &mut self.progress {
+                // Every command is a slice of `data`, so where it starts is how
+                // much of the file the parse has read.
+                let read_bytes = (raw_line.as_ptr() as usize)
+                    .saturating_sub(data.as_ptr() as usize)
+                    .min(total_bytes);
+                let shapes = self.current_primitives.len();
+                // A polarity change moves the shapes out; count again from there.
+                reported_shapes = reported_shapes.min(shapes);
+                if read_bytes.saturating_sub(reported_bytes) >= PROGRESS_BYTE_STEP
+                    || shapes - reported_shapes >= PROGRESS_SHAPE_STEP
+                {
+                    progress(ParseStage::Commands, read_bytes, total_bytes);
+                    reported_bytes = read_bytes;
+                    reported_shapes = shapes;
+                }
+            }
+
             let line_ref = raw_line.trim();
 
             if line_ref.is_empty() {
@@ -1118,6 +1181,12 @@ impl GerberParser {
                 .map_err(|message| JsValue::from_str(&message))?;
             }
         }
+        report_progress(
+            &mut self.progress,
+            ParseStage::Commands,
+            total_bytes,
+            total_bytes,
+        );
 
         self.finish_layers()
     }
@@ -1155,16 +1224,38 @@ impl GerberParser {
             polarity_layers.len(),
             "interaction path region sublayer map",
         )?;
+        let total_shapes = polarity_layers
+            .iter()
+            .map(|layer| layer.primitives.len())
+            .sum();
+        let mut done_shapes = 0;
+        report_progress(&mut self.progress, ParseStage::Geometry, 0, total_shapes);
         for layer in polarity_layers {
             let render_sublayer_idx = gerber_data_layers.len();
+            let layer_shapes = layer.primitives.len();
             let mut gerber_data = Self::primitives_to_gerber_data(
                 layer.primitives,
                 layer.path_regions,
                 layer.polarity == Polarity::Negative,
+                &mut |done| {
+                    report_progress(
+                        &mut self.progress,
+                        ParseStage::Geometry,
+                        done_shapes + done,
+                        total_shapes,
+                    )
+                },
             )?;
+            done_shapes += layer_shapes;
             sublayer_map.push(render_sublayer_idx);
             gerber_data_layers.append(&mut gerber_data);
         }
+        report_progress(
+            &mut self.progress,
+            ParseStage::Geometry,
+            total_shapes,
+            total_shapes,
+        );
         if let Some(interaction_layer) = &mut self.interaction_layer {
             interaction_layer.remap_path_region_sublayers(&sublayer_map)?;
         }
@@ -1180,17 +1271,22 @@ impl GerberParser {
         })
     }
 
-    /// Convert a vector of primitives to GerberData
+    /// Convert a vector of primitives to GerberData, telling `on_progress` how
+    /// many of them are done every `PROGRESS_SHAPE_STEP` primitives.
     fn primitives_to_gerber_data(
         primitives: Vec<Primitive>,
         path_regions: PathRegions,
         is_negative: bool,
+        on_progress: &mut dyn FnMut(usize),
     ) -> Result<Vec<GerberData>, JsValue> {
         let counts = SplitPrimitiveBufferCounts::from_primitives(&primitives);
         let mut plain_buffers = PrimitiveOutputBuffers::reserved_for(&counts.plain)?;
         let mut holed_buffers = PrimitiveOutputBuffers::reserved_for(&counts.holed)?;
 
-        for primitive in primitives {
+        for (index, primitive) in primitives.into_iter().enumerate() {
+            if index % PROGRESS_SHAPE_STEP == 0 && index > 0 {
+                on_progress(index);
+            }
             if primitive_has_hole(&primitive) {
                 holed_buffers.push_primitive(primitive)?;
             } else {
@@ -1483,16 +1579,34 @@ pub fn parse_gerber_with_options(
     parser.parse(data)
 }
 
+#[cfg(test)]
 pub fn parse_gerber_payload_with_options(
     data: &str,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
 ) -> Result<ParsedGerberLayer, JsValue> {
-    let mut parser = GerberParser::with_options_and_interactions(
+    parse_gerber_payload_with_progress(
+        data,
         preserve_arc_regions,
         arc_tessellation_quality,
         true,
+        None,
+    )
+}
+
+pub fn parse_gerber_payload_with_progress(
+    data: &str,
+    preserve_arc_regions: bool,
+    arc_tessellation_quality: u32,
+    collect_interactions: bool,
+    progress: Option<ParseProgress>,
+) -> Result<ParsedGerberLayer, JsValue> {
+    let mut parser = GerberParser::with_options_and_interactions(
+        preserve_arc_regions,
+        arc_tessellation_quality,
+        collect_interactions,
     );
+    parser.progress = progress;
     parser.parse_payload(data)
 }
 
