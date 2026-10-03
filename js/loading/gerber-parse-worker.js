@@ -1,4 +1,8 @@
-import { WASM_VARIANT_32, loadWasmPackage } from "../core/wasm-variant.js";
+import {
+  WASM_VARIANT_32,
+  isMemoryExhaustionError,
+  loadWasmPackage,
+} from "../core/wasm-variant.js";
 
 const WASM_INPUT_RESERVE_MARGIN_BYTES = 1024 * 1024;
 
@@ -56,24 +60,6 @@ function isWorkerUnavailableErrorMessage(message) {
     normalizedMessage.includes("parse worker requires an updated wasm module") ||
     normalizedMessage.includes("failed to fetch dynamically imported module") ||
     normalizedMessage.includes("wasm_gerber_processor")
-  );
-}
-
-// Whether more address space could fix this failure, in which case the pool
-// may parse the layer again in a memory64 worker. A trap is how an allocation
-// the module cannot recover from surfaces, and a RangeError is the engine
-// refusing an output array. A count past u32 fails on any build.
-function isMemoryExhaustionError(error, message) {
-  if (/u32 range/i.test(message)) {
-    return false;
-  }
-  return (
-    (typeof WebAssembly !== "undefined" &&
-      error instanceof WebAssembly.RuntimeError) ||
-    error instanceof RangeError ||
-    /not enough (webassembly )?memory|too large to (parse|render)|supported limit of \d+ items|per-command limit|out of memory/i.test(
-      message,
-    )
   );
 }
 
@@ -243,6 +229,9 @@ self.addEventListener("message", async (event) => {
       error: errorMessage,
       workerUnavailable: isWorkerUnavailableErrorMessage(errorMessage),
       memoryExhausted: isMemoryExhaustionError(error, errorMessage),
+      trapped:
+        typeof WebAssembly !== "undefined" &&
+        error instanceof WebAssembly.RuntimeError,
       workerMemory: {
         beforeBytes,
         afterBytes: getWorkerWasmMemoryBytes(),

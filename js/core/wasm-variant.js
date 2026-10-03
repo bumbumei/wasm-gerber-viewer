@@ -33,6 +33,64 @@ const MIN_PICKING_INDEX_RESERVE_BYTES = BYTES_PER_MIB;
 // so reservations never bring it closer to its 4 GiB limit than before.
 export const WASM32_PICKING_INDEX_RESERVE_CUTOFF_BYTES = 2 * BYTES_PER_GIB;
 
+// Browsers whose WebAssembly supports memory64 (MDN compatibility data,
+// 2026-10). Safari has it only in Technology Preview so far.
+export const MEMORY64_BROWSERS = Object.freeze([
+  Object.freeze({ name: "Chrome", version: 133 }),
+  Object.freeze({ name: "Edge", version: 133 }),
+  Object.freeze({ name: "Firefox", version: 134 }),
+]);
+
+// Why a main instance runs wasm32: the browser lacks memory64, `?wasm=32`
+// pinned it, or the memory64 package failed to load.
+export const WASM32_REASON_UNSUPPORTED = "unsupported";
+export const WASM32_REASON_PINNED = "pinned";
+export const WASM32_REASON_UNAVAILABLE = "unavailable";
+
+// A wasm32 instance this large that traps has most likely run out of address
+// space; a trap in a smaller one points at a bug instead.
+const WASM32_EXHAUSTED_TRAP_MIN_BYTES = BYTES_PER_GIB;
+
+/** Messages the module and the viewer raise when memory runs out. */
+export function isOutOfMemoryMessage(message) {
+  return /not enough (webassembly )?memory|too large to (parse|render)|supported limit of \d+ items|per-command limit|out of memory|memory limit reached|array buffer allocation failed/i.test(
+    String(message ?? ""),
+  );
+}
+
+/**
+ * Whether more address space could fix a parse failure, in which case it is
+ * worth parsing the layer again on memory64. A trap is how an allocation the
+ * module cannot recover from surfaces, and a RangeError is the engine refusing
+ * an output array. A count past u32 fails on any build.
+ */
+export function isMemoryExhaustionError(error, message = error?.message) {
+  if (/u32 range/i.test(String(message ?? ""))) {
+    return false;
+  }
+  return (
+    (typeof WebAssembly !== "undefined" &&
+      error instanceof WebAssembly.RuntimeError) ||
+    error instanceof RangeError ||
+    isOutOfMemoryMessage(message)
+  );
+}
+
+/**
+ * Whether a failure on a wasm32 instance means the data needs more than its
+ * 4 GiB, judged strictly enough to tell the user so: an out-of-memory message,
+ * or a trap once the instance has grown past 1 GiB.
+ */
+export function exceedsWasm32Memory({ message, trapped = false, memoryBytes = 0 }) {
+  if (/u32 range/i.test(String(message ?? ""))) {
+    return false;
+  }
+  return (
+    isOutOfMemoryMessage(message) ||
+    (trapped && Number(memoryBytes) >= WASM32_EXHAUSTED_TRAP_MIN_BYTES)
+  );
+}
+
 // (module (table i64 0 funcref) (memory i64 0)): valid only with memory64.
 const MEMORY64_PROBE_MODULE = new Uint8Array([
   0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,

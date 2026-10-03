@@ -1,13 +1,19 @@
 import { MAX_FILE_SIZE_BYTES, NOTIFICATION_DURATION_MS } from "./config.js";
 import {
+  MEMORY64_BROWSERS,
+  WASM32_REASON_PINNED,
+  WASM32_REASON_UNAVAILABLE,
+  WASM32_REASON_UNSUPPORTED,
   WASM_VARIANT_32,
   WASM_VARIANT_64,
+  exceedsWasm32Memory,
   getLinearMemoryLimitBytes,
   getPickingIndexReserveBytes,
   getRequestedWasmVariant,
   getWasmAddressBits,
   loadWasmPackage,
   resolveWasmVariantPlan,
+  supportsMemory64,
 } from "./wasm-variant.js";
 import { DiagnosticsLog } from "../ui/diagnostics.js";
 import { getViewerElements } from "../ui/dom-elements.js";
@@ -74,6 +80,8 @@ const MAX_PARSE_WORKERS = 4;
 const BYTES_PER_MIB = 1024 * 1024;
 const RECYCLE_PARSE_WORKER_MEMORY_BYTES = 256 * BYTES_PER_MIB;
 const RECYCLE_PARSE_WORKER_GROWTH_BYTES = 128 * BYTES_PER_MIB;
+// Long enough to read the list of browsers; the notice can also be closed.
+const MEMORY_LIMIT_NOTICE_DURATION_MS = 20_000;
 const ARC_TESSELLATION_QUALITY_LEVELS = {
   low: 0,
   normal: 1,
@@ -826,7 +834,12 @@ class GerberParseWorkerPool {
         shouldRecycle = true;
         this.retryWithFallback(task, errorMessage);
       } else {
-        task.reject(new Error(errorMessage));
+        const error = new Error(errorMessage);
+        error.wasmFailure = {
+          trapped: Boolean(event.data.trapped),
+          memoryBytes: Number(event.data.workerMemory?.afterBytes) || 0,
+        };
+        task.reject(error);
       }
     }
 
@@ -927,6 +940,8 @@ export class GerberViewer {
     this.wasmExports = null;
     this.wasmVariantPlan = resolveWasmVariantPlan({ requested: WASM_VARIANT_32 });
     this.wasmAddressBits = 32;
+    // Why the main instance runs wasm32 (WASM32_REASON_*), or null on memory64.
+    this.wasm32Reason = null;
     this.wasmProcessor = null;
     this.interactionProcessor = null;
     this.interactionsEnabled = true;
@@ -1192,6 +1207,8 @@ export class GerberViewer {
     let loaded = null;
     let memory64Failure = null;
 
+    let wasm32Reason = null;
+
     if (plan.main === WASM_VARIANT_64) {
       try {
         loaded = await loadWasmPackage(WASM_VARIANT_64);
@@ -1199,9 +1216,15 @@ export class GerberViewer {
         console.warn("[WASM] memory64 package unavailable, using wasm32:", error);
         memory64Failure = getErrorMessage(error);
         plan = resolveWasmVariantPlan({ requested: WASM_VARIANT_32 });
+        wasm32Reason = WASM32_REASON_UNAVAILABLE;
       }
-    } else if (requested === WASM_VARIANT_64) {
-      memory64Failure = "This browser does not support WebAssembly memory64";
+    } else {
+      wasm32Reason = supportsMemory64()
+        ? WASM32_REASON_PINNED
+        : WASM32_REASON_UNSUPPORTED;
+      if (requested === WASM_VARIANT_64) {
+        memory64Failure = "This browser does not support WebAssembly memory64";
+      }
     }
     loaded ??= await loadWasmPackage(WASM_VARIANT_32);
 
@@ -1209,6 +1232,7 @@ export class GerberViewer {
     this.wasmExports = loaded.wasmExports;
     this.wasmVariantPlan = plan;
     this.wasmAddressBits = getWasmAddressBits(this.wasmModule);
+    this.wasm32Reason = wasm32Reason;
     document.documentElement.dataset.wasmMain = plan.main;
     document.documentElement.dataset.wasmWorker = plan.worker;
     if (memory64Failure && requested === WASM_VARIANT_64) {
@@ -5063,6 +5087,9 @@ export class GerberViewer {
         `Picking data could not be built; feature picking is disabled for this document: ${message}`,
         { abandon },
       );
+      if (this.isWasm32MemoryLimitFailure(error)) {
+        this.showMemoryLimitNotice("Feature picking for these layers");
+      }
       if (abandon) {
         await this.recoverWasmProcessorAfterFatalError("feature picking", error);
       } else if (typeof processor?.clear_interaction_layers === "function") {
@@ -5122,7 +5149,64 @@ export class GerberViewer {
 
     console.error(`Failed to load file ${name}:`, error);
     this.addDiagnostic("error", name, message);
+    if (this.isWasm32MemoryLimitFailure(error)) {
+      this.showMemoryLimitNotice(name);
+      return;
+    }
     this.showError(`Failed to load file ${name}: ${message}`);
+  }
+
+  /**
+   * Whether a failure means the data needs more than the 4 GiB a wasm32
+   * instance can address, on a page whose main instance runs wasm32. Worker
+   * failures carry the worker's trap state and memory size; anything else
+   * happened on the main instance.
+   */
+  isWasm32MemoryLimitFailure(error) {
+    if (!this.wasm32Reason) {
+      return false;
+    }
+    const failure = error?.wasmFailure;
+    return exceedsWasm32Memory({
+      message: getErrorMessage(error),
+      trapped: failure
+        ? failure.trapped
+        : typeof WebAssembly !== "undefined" &&
+          error instanceof WebAssembly.RuntimeError,
+      memoryBytes: failure ? failure.memoryBytes : this.getWasmLinearMemoryBytes(),
+    });
+  }
+
+  /**
+   * Tells the user that `subject` needs more than 4 GiB and what would let
+   * the viewer load it: a browser with memory64, dropping `?wasm=32`, or a
+   * reload when the memory64 build failed to load.
+   */
+  showMemoryLimitNotice(subject) {
+    const browsers = MEMORY64_BROWSERS.map(
+      ({ name, version }) => `${name} ${version} or later`,
+    );
+    const notice =
+      this.wasm32Reason === WASM32_REASON_PINNED
+        ? {
+            title: "More than 4 GiB needed",
+            lead: `${subject} needs more than 4\u00a0GiB of memory, but ?wasm=32 in the address keeps the viewer on the wasm32 build. Remove it to use memory64.`,
+          }
+        : this.wasm32Reason === WASM32_REASON_UNAVAILABLE
+          ? {
+              title: "More than 4 GiB needed",
+              lead: `${subject} needs more than 4\u00a0GiB of memory, but the memory64 build could not be loaded. Reload the page to try again.`,
+            }
+          : {
+              title: "Unsupported browser",
+              lead: `${subject} needs more than the 4\u00a0GiB of memory this browser gives WebAssembly. Open the viewer in a browser that supports WebAssembly memory64:`,
+              items: browsers,
+              note: "Safari does not support it yet.",
+            };
+    this.notifications.showMemoryLimitNotice({
+      ...notice,
+      duration: MEMORY_LIMIT_NOTICE_DURATION_MS,
+    });
   }
 
   reserveWasmInputCapacity(content) {

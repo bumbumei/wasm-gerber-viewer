@@ -2105,6 +2105,14 @@ button {
   padding-left: 18px;
 }
 
+.notification p {
+  margin: 0;
+}
+
+.notification ul + p {
+  margin-top: 7px;
+}
+
 .field-row {
   display: flex;
   align-items: center;
