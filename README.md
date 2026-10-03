@@ -187,7 +187,9 @@ workers stay on wasm32 because it parses faster; a layer is parsed again in a
 memory64 worker only when the wasm32 parser runs out of memory on it. Safari
 and older browsers run wasm32 for everything, as before; when a file there
 needs more than 4 GiB, the viewer says so and lists the browsers that can load
-it.
+it. A browser may also close the page during such a load (iOS Safari does when
+it runs out of memory, then reopens it); the reopened page explains what
+happened instead of loading the same `?url=` again.
 
 Add `?wasm=32` or `?wasm=64` to the viewer URL to run every instance on one
 build. The 300 MiB limit per file and the WebGL limits on a single buffer are
