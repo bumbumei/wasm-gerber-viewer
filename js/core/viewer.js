@@ -1,4 +1,14 @@
 import { MAX_FILE_SIZE_BYTES, NOTIFICATION_DURATION_MS } from "./config.js";
+import {
+  WASM_VARIANT_32,
+  WASM_VARIANT_64,
+  getLinearMemoryLimitBytes,
+  getPickingIndexReserveBytes,
+  getRequestedWasmVariant,
+  getWasmAddressBits,
+  loadWasmPackage,
+  resolveWasmVariantPlan,
+} from "./wasm-variant.js";
 import { DiagnosticsLog } from "../ui/diagnostics.js";
 import { getViewerElements } from "../ui/dom-elements.js";
 import { DrawerController } from "../ui/drawer-controller.js";
@@ -64,8 +74,6 @@ const MAX_PARSE_WORKERS = 4;
 const BYTES_PER_MIB = 1024 * 1024;
 const RECYCLE_PARSE_WORKER_MEMORY_BYTES = 256 * BYTES_PER_MIB;
 const RECYCLE_PARSE_WORKER_GROWTH_BYTES = 128 * BYTES_PER_MIB;
-const WASM_LINEAR_MEMORY_RENDER_LIMIT_BYTES = 3584 * BYTES_PER_MIB;
-const WASM_LINEAR_MEMORY_INTERACTION_LIMIT_BYTES = 3584 * BYTES_PER_MIB;
 const ARC_TESSELLATION_QUALITY_LEVELS = {
   low: 0,
   normal: 1,
@@ -137,6 +145,17 @@ function hasRendererLayerId(value) {
   if (value === undefined || value === null) return false;
   const number = Number(value);
   return Number.isInteger(number) && number >= 0;
+}
+
+/** Total size of the typed arrays in a worker payload. */
+function getTypedArrayBytes(value) {
+  if (!value || typeof value !== "object") return 0;
+  if (ArrayBuffer.isView(value)) return value.byteLength;
+  let bytes = 0;
+  for (const child of Object.values(value)) {
+    bytes += getTypedArrayBytes(child);
+  }
+  return bytes;
 }
 
 function compositeBitsetsEqual(left, right) {
@@ -572,7 +591,10 @@ function getParseWorkerCount(layerCount) {
 }
 
 class GerberParseWorkerPool {
-  constructor(workerCount) {
+  constructor(
+    workerCount,
+    { wasmVariant = WASM_VARIANT_32, fallbackWasmVariant = null } = {},
+  ) {
     this.workers = [];
     this.idleWorkers = [];
     this.queue = [];
@@ -580,6 +602,14 @@ class GerberParseWorkerPool {
     this.nextTaskId = 0;
     this.isDisposed = false;
     this.unavailableError = null;
+    this.wasmVariant = wasmVariant;
+    // Build that parses a layer again after `wasmVariant` ran out of memory on
+    // it. Those layers are the largest ones, so they are parsed one at a time
+    // in a worker of their own that is terminated afterwards.
+    this.fallbackWasmVariant = fallbackWasmVariant;
+    this.fallbackQueue = [];
+    this.fallbackWorker = null;
+    this.fallbackTask = null;
     this.workerUrl = new URL("../loading/gerber-parse-worker.js", import.meta.url);
 
     try {
@@ -634,12 +664,96 @@ class GerberParseWorkerPool {
       activeTask.reject(unavailableError);
     }
     this.activeTasks.clear();
+    this.rejectFallbackTasks(unavailableError);
 
     for (const worker of this.workers) {
       worker.terminate();
     }
     this.workers = [];
     this.idleWorkers = [];
+  }
+
+  createTaskMessage(task, wasmVariant) {
+    return {
+      id: task.id,
+      content: task.content,
+      offset: task.offset,
+      preserveArcRegions: task.options.preserveArcRegions,
+      arcTessellationQuality: task.options.arcTessellationQuality,
+      interactionsEnabled: task.options.interactionsEnabled,
+      wasmVariant,
+    };
+  }
+
+  rejectFallbackTasks(error) {
+    for (const task of this.fallbackQueue) {
+      task.reject(error);
+    }
+    this.fallbackQueue = [];
+    this.fallbackTask?.reject(error);
+    this.fallbackTask = null;
+    this.fallbackWorker?.terminate();
+    this.fallbackWorker = null;
+  }
+
+  retryWithFallback(task, errorMessage) {
+    task.fallbackReason = errorMessage;
+    this.fallbackQueue.push(task);
+    this.pumpFallback();
+  }
+
+  pumpFallback() {
+    if (this.fallbackWorker || this.fallbackQueue.length === 0) {
+      return;
+    }
+
+    const task = this.fallbackQueue.shift();
+    const finish = (settle) => {
+      if (this.fallbackTask !== task) return;
+      this.fallbackTask = null;
+      this.fallbackWorker?.terminate();
+      this.fallbackWorker = null;
+      settle();
+      this.pumpFallback();
+    };
+    const fail = (message) =>
+      finish(() =>
+        task.reject(
+          new Error(
+            `${message} (${this.fallbackWasmVariant} retry after ${this.wasmVariant} failed: ${task.fallbackReason})`,
+          ),
+        ),
+      );
+
+    try {
+      const worker = new Worker(this.workerUrl, { type: "module" });
+      this.fallbackWorker = worker;
+      this.fallbackTask = task;
+      worker.addEventListener("message", (event) => {
+        if (event.data?.id !== task.id) return;
+        if (event.data.ok) {
+          finish(() =>
+            task.resolve({
+              renderPayload: event.data.parsedLayer,
+              interactionPayload: event.data.interactionPayload ?? null,
+              odbDiagnostics: event.data.odbDiagnostics ?? null,
+              wasmVariant: this.fallbackWasmVariant,
+              fallbackReason: task.fallbackReason,
+            }),
+          );
+        } else {
+          fail(event.data.error || "Failed to parse Gerber layer");
+        }
+      });
+      worker.addEventListener("error", (event) => {
+        event?.preventDefault?.();
+        fail(getWorkerErrorEventMessage(event));
+      });
+      worker.postMessage(this.createTaskMessage(task, this.fallbackWasmVariant));
+    } catch (error) {
+      this.fallbackTask = task;
+      fail(getErrorMessage(error));
+    }
   }
 
   parse(content, offset, options = {}) {
@@ -666,14 +780,7 @@ class GerberParseWorkerPool {
       const task = this.queue.shift();
       this.activeTasks.set(worker, task);
       try {
-        worker.postMessage({
-          id: task.id,
-          content: task.content,
-          offset: task.offset,
-          preserveArcRegions: task.options.preserveArcRegions,
-          arcTessellationQuality: task.options.arcTessellationQuality,
-          interactionsEnabled: task.options.interactionsEnabled,
-        });
+        worker.postMessage(this.createTaskMessage(task, this.wasmVariant));
       } catch (error) {
         this.activeTasks.delete(worker);
         const unavailableError = new ParseWorkerUnavailableError(
@@ -693,13 +800,14 @@ class GerberParseWorkerPool {
     }
 
     this.activeTasks.delete(worker);
-    const shouldRecycle = this.shouldRecycleWorker(event.data?.workerMemory);
+    let shouldRecycle = this.shouldRecycleWorker(event.data?.workerMemory);
 
     if (event.data.ok) {
       task.resolve({
         renderPayload: event.data.parsedLayer,
         interactionPayload: event.data.interactionPayload ?? null,
         odbDiagnostics: event.data.odbDiagnostics ?? null,
+        wasmVariant: this.wasmVariant,
       });
     } else {
       const errorMessage = event.data.error || "Failed to parse Gerber layer";
@@ -713,7 +821,13 @@ class GerberParseWorkerPool {
         return;
       }
 
-      task.reject(new Error(errorMessage));
+      if (this.fallbackWasmVariant && event.data.memoryExhausted) {
+        // The instance that ran out of memory may have trapped mid-parse.
+        shouldRecycle = true;
+        this.retryWithFallback(task, errorMessage);
+      } else {
+        task.reject(new Error(errorMessage));
+      }
     }
 
     if (!this.isDisposed) {
@@ -784,6 +898,7 @@ class GerberParseWorkerPool {
     }
     this.queue = [];
     this.activeTasks.clear();
+    this.rejectFallbackTasks(new Error("Parse worker pool has been disposed"));
 
     for (const worker of this.workers) {
       worker.terminate();
@@ -810,6 +925,8 @@ export class GerberViewer {
     // WASM module and single processor
     this.wasmModule = null;
     this.wasmExports = null;
+    this.wasmVariantPlan = resolveWasmVariantPlan({ requested: WASM_VARIANT_32 });
+    this.wasmAddressBits = 32;
     this.wasmProcessor = null;
     this.interactionProcessor = null;
     this.interactionsEnabled = true;
@@ -1031,9 +1148,7 @@ export class GerberViewer {
 
   async init() {
     // Load WASM module
-    this.wasmModule = await import("../../wasm/pkg/wasm_gerber_processor.js");
-    this.wasmExports = await this.wasmModule.default();
-    this.wasmModule.init_panic_hook();
+    await this.loadMainWasmPackage();
 
     this.createWebGlProcessor();
     this.normalizePersistedParserOptions();
@@ -1064,6 +1179,45 @@ export class GerberViewer {
     this.updateViewFlipControls();
     this.requestRender();
     this.loadInitialUrlSource();
+  }
+
+  /**
+   * Loads the main instance's package: the memory64 build where the browser
+   * supports it (and `?wasm=32` does not rule it out), otherwise wasm32. A
+   * deployment that ships no wasm/pkg64 falls back to wasm32 as well.
+   */
+  async loadMainWasmPackage() {
+    const requested = getRequestedWasmVariant();
+    let plan = resolveWasmVariantPlan({ requested });
+    let loaded = null;
+    let memory64Failure = null;
+
+    if (plan.main === WASM_VARIANT_64) {
+      try {
+        loaded = await loadWasmPackage(WASM_VARIANT_64);
+      } catch (error) {
+        console.warn("[WASM] memory64 package unavailable, using wasm32:", error);
+        memory64Failure = getErrorMessage(error);
+        plan = resolveWasmVariantPlan({ requested: WASM_VARIANT_32 });
+      }
+    } else if (requested === WASM_VARIANT_64) {
+      memory64Failure = "This browser does not support WebAssembly memory64";
+    }
+    loaded ??= await loadWasmPackage(WASM_VARIANT_32);
+
+    this.wasmModule = loaded.wasmModule;
+    this.wasmExports = loaded.wasmExports;
+    this.wasmVariantPlan = plan;
+    this.wasmAddressBits = getWasmAddressBits(this.wasmModule);
+    document.documentElement.dataset.wasmMain = plan.main;
+    document.documentElement.dataset.wasmWorker = plan.worker;
+    if (memory64Failure && requested === WASM_VARIANT_64) {
+      this.addDiagnostic(
+        "warning",
+        "memory64 unavailable",
+        `${memory64Failure} Using the wasm32 build, limited to 4 GiB.`,
+      );
+    }
   }
 
   createLayerContextMenu() {
@@ -3200,41 +3354,47 @@ export class GerberViewer {
       total: layerSnapshot.length,
     });
 
+    const serialParser = this.createSerialLayerParser({
+      useParseWorker: layerSnapshot.some(isGerberLayer),
+    });
     try {
       const parsedLayers = [];
-      for (const [index, layer] of layerSnapshot.entries()) {
-        this.updateLoadingModal({
-          title: "Applying options",
-          stage: "Parsing",
-          fileName: layer.name,
-          current: index,
-          total: layerSnapshot.length,
-        });
+      try {
+        for (const [index, layer] of layerSnapshot.entries()) {
+          this.updateLoadingModal({
+            title: "Applying options",
+            stage: "Parsing",
+            fileName: layer.name,
+            current: index,
+            total: layerSnapshot.length,
+          });
 
-        if (isCompositeLayer(layer)) {
-          parsedLayers.push({ ...layer, parsedLayer: null });
-        } else if (layer.kind === DRILL_LAYER_KIND) {
-          parsedLayers.push({ ...layer, parsedLayer: null });
-        } else {
-          try {
-            const parseResult = await this.parseLayerContent(
-              layer.sourceContent,
-              layer.offset,
-              null,
-              { forceInteractions: true },
-            );
-            parsedLayers.push({
-              ...layer,
-              parsedLayer: parseResult.renderPayload,
-              interactionPayload: parseResult.interactionPayload,
-            });
-          } catch (error) {
-            this.handleLayerLoadError(layer.name, error);
-            throw new Error(
-              `Failed to apply options because ${layer.name} could not be parsed: ${getErrorMessage(error)}`,
-            );
+          if (isCompositeLayer(layer)) {
+            parsedLayers.push({ ...layer, parsedLayer: null });
+          } else if (layer.kind === DRILL_LAYER_KIND) {
+            parsedLayers.push({ ...layer, parsedLayer: null });
+          } else {
+            try {
+              const parseResult = await serialParser.parse(
+                layer.sourceContent,
+                layer.offset,
+                { forceInteractions: true },
+              );
+              parsedLayers.push({
+                ...layer,
+                parsedLayer: parseResult.renderPayload,
+                interactionPayload: parseResult.interactionPayload,
+              });
+            } catch (error) {
+              this.handleLayerLoadError(layer.name, error);
+              throw new Error(
+                `Failed to apply options because ${layer.name} could not be parsed: ${getErrorMessage(error)}`,
+              );
+            }
           }
         }
+      } finally {
+        serialParser.dispose();
       }
 
       let stagedProcessor = null;
@@ -4083,7 +4243,11 @@ export class GerberViewer {
         "Parallel parsing unavailable",
         `${getErrorMessage(error)} Falling back to serial parsing.`,
       );
-      return this.loadLayerSourcesSerially(layerSources, { title, total });
+      return this.loadLayerSourcesSerially(layerSources, {
+        title,
+        total,
+        useParseWorker: false,
+      });
     } finally {
       parseWorkerPool?.dispose();
     }
@@ -4091,25 +4255,93 @@ export class GerberViewer {
 
   async loadLayerSourcesSerially(
     layerSources,
-    { title = "Loading files", total = layerSources.length } = {},
+    {
+      title = "Loading files",
+      total = layerSources.length,
+      useParseWorker = true,
+    } = {},
   ) {
     const results = [];
+    const serialParser = this.createSerialLayerParser({
+      useParseWorker:
+        useParseWorker &&
+        layerSources.some((source) => !isDrillSource(source)),
+    });
 
-    for (const [index, source] of layerSources.entries()) {
-      if (this.wasmMemoryExhausted) {
-        results.push(...Array(layerSources.length - index).fill(false));
-        break;
+    try {
+      for (const [index, source] of layerSources.entries()) {
+        if (this.wasmMemoryExhausted) {
+          results.push(...Array(layerSources.length - index).fill(false));
+          break;
+        }
+        results.push(
+          await this.loadLayerSourceSerially(source, {
+            index,
+            total,
+            title,
+            serialParser,
+          }),
+        );
       }
-      results.push(
-        await this.loadLayerSourceSerially(source, {
-          index,
-          total,
-          title,
-        }),
-      );
+    } finally {
+      serialParser.dispose();
     }
 
     return results;
+  }
+
+  /**
+   * Whether Gerber layers parse in a worker even where the viewer otherwise
+   * parses on the main instance: a single file, the serial path that drill
+   * files force, and re-parsing for a parser option. Only the mixed setup
+   * needs it, because its memory64 main instance parses up to a third slower
+   * than a wasm32 worker.
+   */
+  parsesOffMainInstance() {
+    const plan = this.wasmVariantPlan;
+    return Boolean(plan) && plan.main !== plan.worker && typeof Worker !== "undefined";
+  }
+
+  /**
+   * Parser for code that handles one layer at a time. It parses on the main
+   * instance unless `parsesOffMainInstance()` asks for a single worker, and
+   * goes back to the main instance if that worker becomes unavailable.
+   */
+  createSerialLayerParser({ useParseWorker = true } = {}) {
+    let parseWorkerPool =
+      useParseWorker && this.parsesOffMainInstance()
+        ? this.createParseWorkerPool(1)
+        : null;
+    return {
+      parse: async (content, offset, parseOptionOverrides = {}) => {
+        if (parseWorkerPool) {
+          try {
+            return await this.parseLayerContent(
+              content,
+              offset,
+              parseWorkerPool,
+              parseOptionOverrides,
+            );
+          } catch (error) {
+            if (!isParseWorkerUnavailableError(error)) {
+              throw error;
+            }
+            parseWorkerPool.dispose();
+            parseWorkerPool = null;
+            this.addDiagnostic(
+              "warning",
+              "Worker parsing unavailable",
+              `${getErrorMessage(error)} Parsing on the main instance instead.`,
+            );
+          }
+        }
+        return this.parseLayerContent(content, offset, null, parseOptionOverrides);
+      },
+      dispose: () => {
+        parseWorkerPool?.dispose();
+        parseWorkerPool = null;
+      },
+    };
   }
 
   async collectLayerSources(files) {
@@ -4367,13 +4599,19 @@ export class GerberViewer {
   }
 
   createParseWorkerPool(layerCount) {
-    const workerCount = getParseWorkerCount(layerCount);
+    let workerCount = getParseWorkerCount(layerCount);
+    if (workerCount === 0 && layerCount > 0 && this.parsesOffMainInstance()) {
+      workerCount = 1;
+    }
     if (workerCount === 0) {
       return null;
     }
 
     try {
-      return new GerberParseWorkerPool(workerCount);
+      return new GerberParseWorkerPool(workerCount, {
+        wasmVariant: this.wasmVariantPlan?.worker,
+        fallbackWasmVariant: this.wasmVariantPlan?.fallbackWorker,
+      });
     } catch (error) {
       console.warn("[Parse] Failed to create parse workers:", error);
       this.addDiagnostic(
@@ -4482,6 +4720,16 @@ export class GerberViewer {
     if (note) this.addDiagnostic("warning", name, note);
   }
 
+  /** Notes a layer the wasm32 parser ran out of memory on and memory64 parsed. */
+  reportMemory64Reparse(name, parseResult) {
+    if (!parseResult?.fallbackReason) return;
+    this.addDiagnostic(
+      "warning",
+      name,
+      `Parsed with the memory64 build after the wasm32 parser ran out of memory: ${parseResult.fallbackReason}`,
+    );
+  }
+
   async readAndParseLayerSource(
     source,
     {
@@ -4524,12 +4772,18 @@ export class GerberViewer {
         current: progress.completedLayers,
         total,
       });
+      const parseResult = await this.parseLayerContent(
+        content,
+        source.offset,
+        parseWorkerPool,
+      );
       const {
         renderPayload,
         interactionPayload = null,
         odbDiagnostics = null,
-      } = await this.parseLayerContent(content, source.offset, parseWorkerPool);
+      } = parseResult;
       this.reportOdbDiagnostics(name, odbDiagnostics);
+      this.reportMemory64Reparse(name, parseResult);
       this.updateLoadingModal({
         stage: "Parsing",
         fileName: name,
@@ -4567,7 +4821,7 @@ export class GerberViewer {
 
   async loadLayerSourceSerially(
     source,
-    { index = 0, total = 1, title = "Loading files" } = {},
+    { index = 0, total = 1, title = "Loading files", serialParser = null } = {},
   ) {
     const { name, readText } = source;
 
@@ -4608,12 +4862,11 @@ export class GerberViewer {
         let renderPayload = null;
         let interactionPayload = null;
         try {
-          const parseResult = await this.parseLayerContent(
-            content,
-            source.offset,
-            null,
-          );
+          const parseResult = serialParser
+            ? await serialParser.parse(content, source.offset)
+            : await this.parseLayerContent(content, source.offset, null);
           this.reportOdbDiagnostics(name, parseResult.odbDiagnostics ?? null);
+          this.reportMemory64Reparse(name, parseResult);
           renderPayload = parseResult.renderPayload;
           interactionPayload = parseResult.interactionPayload ?? null;
           layerRecord = await this.addParsedLayer(name, renderPayload, {
@@ -4790,6 +5043,7 @@ export class GerberViewer {
         if (!processorIsCurrent()) return;
         this.ensureInteractionMemoryHeadroom();
         if (!processorIsCurrent()) return;
+        this.reservePickingIndexMemory(layer.interactionPayload);
         processor.add_interaction_payload(layer.layerId, layer.interactionPayload);
       }
 
@@ -4821,6 +5075,32 @@ export class GerberViewer {
     } finally {
       this.clearInteractionPayloads(layerRecords);
       this.updateUiState();
+    }
+  }
+
+  /**
+   * Grows the main instance once for the picking index about to be built.
+   * The index is made of many small allocations, each of which would
+   * otherwise grow the memory by a page or two, and those grows cost more
+   * than the build itself, several times more on memory64.
+   */
+  reservePickingIndexMemory(interactionPayload) {
+    if (typeof this.wasmModule?.reserve_input_capacity !== "function") {
+      return;
+    }
+
+    const reserveBytes = getPickingIndexReserveBytes({
+      addressBits: this.wasmAddressBits,
+      payloadBytes: getTypedArrayBytes(interactionPayload),
+      memoryBytes: this.getWasmLinearMemoryBytes(),
+    });
+    if (reserveBytes === 0) {
+      return;
+    }
+    try {
+      this.wasmModule.reserve_input_capacity(reserveBytes);
+    } catch (_error) {
+      // Building the index reports a real shortage of memory.
     }
   }
 
@@ -4873,8 +5153,17 @@ export class GerberViewer {
     return currentBytes < limitBytes;
   }
 
+  /**
+   * Size the main instance's linear memory may reach before the viewer stops
+   * adding layers and picking data: just under 4 GiB on wasm32, and up to
+   * just under 16 GiB on a memory64 main instance.
+   */
+  getWasmLinearMemoryLimitBytes() {
+    return getLinearMemoryLimitBytes(this.wasmAddressBits);
+  }
+
   ensureRenderPayloadMemoryHeadroom() {
-    if (this.hasWasmLinearMemoryHeadroom(WASM_LINEAR_MEMORY_RENDER_LIMIT_BYTES)) {
+    if (this.hasWasmLinearMemoryHeadroom(this.getWasmLinearMemoryLimitBytes())) {
       return;
     }
 
@@ -4883,9 +5172,7 @@ export class GerberViewer {
   }
 
   ensureInteractionMemoryHeadroom() {
-    if (
-      this.hasWasmLinearMemoryHeadroom(WASM_LINEAR_MEMORY_INTERACTION_LIMIT_BYTES)
-    ) {
+    if (this.hasWasmLinearMemoryHeadroom(this.getWasmLinearMemoryLimitBytes())) {
       return;
     }
     throw new Error("WASM memory limit reached");

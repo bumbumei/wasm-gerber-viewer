@@ -30,5 +30,17 @@ pub(crate) fn format_bytes(bytes: usize) -> String {
     }
 }
 
+/// Element count as the `u32` that typed-array lengths and the compact offset
+/// tables carry. A 64-bit build can hold more elements than a `u32` counts, so
+/// the overflow is reported instead of truncated.
+pub(crate) fn checked_u32_len(len: usize, context: &str) -> Result<u32, String> {
+    u32::try_from(len).map_err(|_| {
+        format!(
+            "Gerber layer is too large: {context} holds {} values, exceeding the u32 range",
+            format_count(len)
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests;

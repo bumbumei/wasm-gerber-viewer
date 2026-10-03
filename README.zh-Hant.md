@@ -25,11 +25,13 @@
 - 效能測試 - Stars: [1K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-stars-1K.gbr), [10K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-stars-10K.gbr), [100K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-100K.gbr), [1M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr), [5M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=5&repeatOffsetX=70), [10M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=10&repeatOffsetX=70), [20M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=20&repeatOffsetX=70), [50M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=50&repeatOffsetX=70), [100M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=100&repeatOffsetX=0.007)
 - 效能測試 - Single region: [72K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-region-72K.gbr), [648K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-region-648K.gbr), [1.8M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-region-1.8M.gbr)
 - 效能測試 - Arc region: [1.3M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-arc-region-1.3M.gbr)
+- Memory64 測試 - Pads，使用超過 4 GiB 記憶體: [24M](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fbumbumei.github.io%2Fwasm-gerber-viewer%2Fdemo%2Fmemory64-test-pads-24M.gbr)
 
 ## 功能特色
 
 - 針對大型 Gerber 檔案（10 MB 以上）最佳化的高效能渲染
 - 基於 WASM 與 WebGL2 的硬體加速渲染
+- 在支援 WebAssembly memory64 的瀏覽器中可載入超過 4 GiB 的圖層資料
 - 支援 RS-274X Gerber 渲染
 - 支援 NC drill 疊加渲染
 - 支援匯入 ODB++ 作業（`.zip`、`.tgz`、`.tar.gz`、`.tar`）
@@ -101,6 +103,21 @@ rustup target add wasm32-unknown-unknown
 wasm-pack build wasm --target web --out-dir pkg --release
 ```
 
+### memory64 建置（選用）
+
+在支援 WebAssembly memory64 的瀏覽器中，檢視器會為主實例載入 `wasm/pkg64`
+中的第二個建置。沒有 `wasm/pkg64` 時，所有位置都使用 wasm32 建置。
+
+```bash
+./scripts/build-wasm64.sh
+```
+
+`wasm64-unknown-unknown` 沒有預先建置的標準函式庫，因此指令碼會安裝固定日期的
+nightly 工具鏈與 `rust-src`，從原始碼建置 `std`，並執行與 `wasm/Cargo.lock`
+版本一致的 `wasm-bindgen` CLI。模組使用 binaryen 133 的 `wasm-opt` 最佳化；
+如果已安裝的 `wasm-opt` 不接受 memory64 模組（wasm-pack 內附的版本就是如此），
+指令碼會自行下載。
+
 ## npm 套件
 
 [wasm-gerber-renderer](packages/wasm-gerber-renderer/README.zh-Hant.md)
@@ -134,7 +151,8 @@ wasm-gerber-viewer/
 ├── wasm/
 │   ├── Cargo.toml                     # Rust crate manifest
 │   ├── README.md                      # Rust/WASM 管線說明
-│   ├── pkg/                           # 產生的 wasm-pack 輸出
+│   ├── pkg/                           # 產生的 wasm-pack 輸出（wasm32）
+│   ├── pkg64/                         # 產生的 memory64 建置（scripts/build-wasm64.sh）
 │   └── src/
 │       ├── lib.rs                     # WASM API 入口
 │       ├── tests.rs                   # crate 層級測試
@@ -157,6 +175,22 @@ wasm-gerber-viewer/
 需要支援 WebGL2 的現代瀏覽器。
 
 - Chrome 96+, Firefox 114+, Safari 15.4+, Edge 96+
+
+### 超過 4 GiB 的記憶體
+
+在支援 WebAssembly memory64 的瀏覽器（Chrome 與 Edge 133+、Firefox 134+）中，
+保存所有已載入圖層選取資料的主實例會執行 memory64 建置，可以從 4 GiB 成長到約
+16 GiB。解析 worker 仍使用解析較快的 wasm32；只有當 wasm32 解析器因記憶體不足
+而失敗時，該圖層才會在 memory64 worker 中重新解析。Safari 與舊版瀏覽器和先前
+一樣，全部執行 wasm32。
+
+在檢視器 URL 後加上 `?wasm=32` 或 `?wasm=64`，可以讓所有實例都執行同一個建置。
+單一檔案 300 MiB 的限制以及 WebGL 對單一緩衝區的限制維持不變。
+
+`demo/memory64-test-pads-24M.gbr` 是用來驗證此行為的範例：15 KiB 的檔案會展開為
+2400 萬個焊墊，載入後主實例約佔 5 GiB。載入它需要 16 GiB 機器的大部分記憶體，
+並且在 wasm32 下會失敗。可用
+`node scripts/generate-memory64-sample.mjs [焊墊數（百萬）]` 產生其他大小。
 
 ## 範例來源
 
