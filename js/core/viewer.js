@@ -15,6 +15,13 @@ import {
   resolveWasmVariantPlan,
   supportsMemory64,
 } from "./wasm-variant.js";
+import {
+  clearLoadInProgress,
+  describeLoadedFiles,
+  isAppleMobileDevice,
+  markLoadInProgress,
+  takeInterruptedLoad,
+} from "../loading/interrupted-load.js";
 import { DiagnosticsLog } from "../ui/diagnostics.js";
 import { getViewerElements } from "../ui/dom-elements.js";
 import { DrawerController } from "../ui/drawer-controller.js";
@@ -1162,6 +1169,12 @@ export class GerberViewer {
   }
 
   async init() {
+    // A load still marked as running means the browser ended this page
+    // during it, typically for running out of memory.
+    const interruptedLoad = takeInterruptedLoad();
+    // Leaving the page on purpose is not a crash.
+    window.addEventListener("pagehide", () => clearLoadInProgress());
+
     // Load WASM module
     await this.loadMainWasmPackage();
 
@@ -1193,7 +1206,17 @@ export class GerberViewer {
     this.updateMeasurementUnitControl();
     this.updateViewFlipControls();
     this.requestRender();
-    this.loadInitialUrlSource();
+    // Loading the same ?url= again would end the page the same way, so it
+    // waits for the user to reload.
+    const reloadingInterruptedUrl =
+      Boolean(interruptedLoad?.sourceUrl) &&
+      interruptedLoad.sourceUrl === getInitialSourceUrl();
+    if (interruptedLoad) {
+      this.showInterruptedLoadNotice(interruptedLoad, {
+        skippedUrl: reloadingInterruptedUrl,
+      });
+    }
+    this.loadInitialUrlSource({ skip: reloadingInterruptedUrl });
   }
 
   /**
@@ -4085,10 +4108,11 @@ export class GerberViewer {
       `Max ${formatFileSize(MAX_FILE_SIZE_BYTES)} per file`;
   }
 
-  async loadInitialUrlSource() {
+  async loadInitialUrlSource({ skip = false } = {}) {
     const sourceUrl = getInitialSourceUrl();
-    if (!sourceUrl) {
+    if (!sourceUrl || skip) {
       this.isInitialUrlLoading = false;
+      this.updateUiState();
       return;
     }
     try {
@@ -4217,7 +4241,21 @@ export class GerberViewer {
     });
   }
 
-  async loadLayerSources(layerSources, { title = "Loading files" } = {}) {
+  async loadLayerSources(layerSources, options = {}) {
+    // Marked for the length of the load: if the browser ends the page in the
+    // middle, the next start finds the marker (see takeInterruptedLoad).
+    markLoadInProgress({
+      names: layerSources.map((source) => source.name),
+      sourceUrl: this.isInitialUrlLoading ? getInitialSourceUrl() : null,
+    });
+    try {
+      return await this.addLayerSources(layerSources, options);
+    } finally {
+      clearLoadInProgress();
+    }
+  }
+
+  async addLayerSources(layerSources, { title = "Loading files" } = {}) {
     this.wasmMemoryExhausted = false;
     if (this.layers.length === 0) {
       this.disposeInteractionProcessor();
@@ -5183,9 +5221,7 @@ export class GerberViewer {
    * reload when the memory64 build failed to load.
    */
   showMemoryLimitNotice(subject) {
-    const browsers = MEMORY64_BROWSERS.map(
-      ({ name, version }) => `${name} ${version} or later`,
-    );
+    const advice = this.getMemory64BrowserAdvice();
     const notice =
       this.wasm32Reason === WASM32_REASON_PINNED
         ? {
@@ -5199,10 +5235,67 @@ export class GerberViewer {
             }
           : {
               title: "Unsupported browser",
-              lead: `${subject} needs more than the 4\u00a0GiB of memory this browser gives WebAssembly. Open the viewer in a browser that supports WebAssembly memory64:`,
-              items: browsers,
-              note: "Safari does not support it yet.",
+              lead: `${subject} needs more than the 4\u00a0GiB of memory this browser gives WebAssembly. ${advice.lead}`,
+              items: advice.items,
+              note: advice.note,
             };
+    this.notifications.showMemoryLimitNotice({
+      ...notice,
+      duration: MEMORY_LIMIT_NOTICE_DURATION_MS,
+    });
+  }
+
+  /**
+   * Where to open data that needs memory64. On iPhone and iPad every browser
+   * runs Safari's engine, so only a computer will do there.
+   */
+  getMemory64BrowserAdvice() {
+    const items = MEMORY64_BROWSERS.map(
+      ({ name, version }) => `${name} ${version} or later`,
+    );
+    return isAppleMobileDevice()
+      ? {
+          lead: "Open it on a computer, in a browser that supports WebAssembly memory64:",
+          items,
+          note: "On iPhone and iPad every browser uses Safari's engine, which does not support it yet.",
+        }
+      : {
+          lead: "Open the viewer in a browser that supports WebAssembly memory64:",
+          items,
+          note: "Safari does not support it yet.",
+        };
+  }
+
+  /**
+   * Explains a load the browser ended the page in the middle of. No error
+   * reached the page then, so the cause is inferred: memory, the usual reason
+   * a browser kills a tab, and on a wasm32-only browser the missing memory64.
+   */
+  showInterruptedLoadNotice(load, { skippedUrl = false } = {}) {
+    const stopped = `Loading ${describeLoadedFiles(load)} stopped this page before it finished`;
+    const retry = skippedUrl
+      ? " It was not loaded again; reload the page to try once more."
+      : "";
+    let notice;
+    if (this.wasm32Reason === WASM32_REASON_UNSUPPORTED) {
+      const advice = this.getMemory64BrowserAdvice();
+      notice = {
+        title: "Unsupported browser",
+        lead: `${stopped}, most likely because it needs more memory than this browser gives WebAssembly. ${advice.lead}`,
+        items: advice.items,
+        note: `${advice.note}${retry}`,
+      };
+    } else if (this.wasm32Reason === WASM32_REASON_PINNED) {
+      notice = {
+        title: "Loading stopped",
+        lead: `${stopped}, most likely for lack of memory. ?wasm=32 in the address keeps the viewer on the 4\u00a0GiB wasm32 build; remove it to use memory64.${retry}`,
+      };
+    } else {
+      notice = {
+        title: "Loading stopped",
+        lead: `${stopped}, most likely because the device ran out of memory.${retry}`,
+      };
+    }
     this.notifications.showMemoryLimitNotice({
       ...notice,
       duration: MEMORY_LIMIT_NOTICE_DURATION_MS,

@@ -398,6 +398,155 @@ test("a missing memory64 build asks for a reload instead of another browser", as
   await expect(page.locator("#warning-message li")).toHaveCount(0);
 });
 
+const LOAD_MARKER_KEY = "gerber-viewer:load-in-progress";
+const IPHONE_USER_AGENT =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1";
+
+// Serves `source` at a fixed address and returns the viewer URL that opens it.
+async function remoteSource(page, name, source) {
+  const base = test.info().project.use.baseURL;
+  await page.route(`**/remote-samples/${name}`, (route) =>
+    route.fulfill({ contentType: "text/plain", body: source }));
+  const fileUrl = `${base}/remote-samples/${name}`;
+  return { fileUrl, viewerUrl: `/?url=${encodeURIComponent(fileUrl)}` };
+}
+
+// What a crashed load leaves behind, written before the viewer starts.
+async function seedInterruptedLoad(page, marker) {
+  await page.addInitScript(
+    ({ key, marker }) => {
+      if (sessionStorage.getItem("seeded-interrupted-load")) return;
+      sessionStorage.setItem("seeded-interrupted-load", "1");
+      sessionStorage.setItem(key, JSON.stringify({ ...marker, startedAt: Date.now() }));
+    },
+    { key: LOAD_MARKER_KEY, marker },
+  );
+}
+
+test("a load the browser killed is not repeated, and the reopened page says why", async ({ page, browser }) => {
+  test.setTimeout(120_000);
+  await hideMemory64(page);
+  await failWasm32Parser(page);
+  const { viewerUrl } = await remoteSource(page, "dense.gbr", padSource("WASM32-HANG"));
+  // Playwright actions snapshot the page for traces, which a stuck page never
+  // answers, so the stuck page is only driven through the protocol.
+  const pageCdp = await page.context().newCDPSession(page);
+  const fetched = page.waitForRequest("**/remote-samples/dense.gbr");
+  await page.goto(viewerUrl);
+  await fetched;
+  // The parse now holds the page's main thread. Move the tab to another site
+  // and end the stuck process from outside, the way a browser ends a tab that
+  // ran out of memory: the page never gets to run its pagehide handler.
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  await sleep(1_000);
+  // The stuck renderer is the one burning CPU right now; other renderers of
+  // this shared browser are idle.
+  const cdp = await browser.newBrowserCDPSession();
+  const rendererCpu = async () => {
+    const { processInfo } = await cdp.send("SystemInfo.getProcessInfo");
+    return new Map(
+      processInfo
+        .filter((process) => process.type === "renderer")
+        .map((process) => [process.id, process.cpuTime]),
+    );
+  };
+  const before = await rendererCpu();
+  await sleep(1_000);
+  const after = await rendererCpu();
+  const [stuckId] = [...after]
+    .map(([id, cpuTime]) => [id, cpuTime - (before.get(id) ?? 0)])
+    .sort((left, right) => right[1] - left[1])[0];
+  const otherSite = new URL(test.info().project.use.baseURL);
+  otherSite.hostname = "localhost";
+  const leftStuckPage = page.waitForURL(/localhost/);
+  await pageCdp.send("Page.navigate", {
+    url: new URL("/demo/preview.png", otherSite).href,
+  });
+  await leftStuckPage;
+  try {
+    process.kill(stuckId);
+  } catch (_error) {
+    // The browser already ended it.
+  }
+
+  // The tab comes back to the same address.
+  const refetched = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/remote-samples/dense.gbr")) refetched.push(request.url());
+  });
+  await page.goto(viewerUrl);
+  await expectBuilds(page, "wasm32", "wasm32");
+  await expectNotice(page, "Unsupported browser", [
+    "Loading dense.gbr stopped this page before it finished",
+    "needs more memory than this browser gives WebAssembly",
+    ...SUPPORTED_BROWSER_LIST,
+    "It was not loaded again; reload the page to try once more.",
+  ]);
+  await page.waitForTimeout(500);
+  expect(refetched).toEqual([]);
+  await expect(page.locator(".gerber-layer-item")).toHaveCount(0);
+  expect(await page.evaluate((key) => sessionStorage.getItem(key), LOAD_MARKER_KEY)).toBeNull();
+});
+
+test("after the notice a reload tries the same address again", async ({ page }) => {
+  const { fileUrl, viewerUrl } = await remoteSource(page, "pad.gbr", padSource());
+  await seedInterruptedLoad(page, { names: ["pad.gbr"], nameCount: 1, sourceUrl: fileUrl });
+  await page.goto(viewerUrl);
+  // This browser has memory64, so memory is the only suspect.
+  await expectNotice(page, "Loading stopped", [
+    "Loading pad.gbr stopped this page before it finished, most likely because the device ran out of memory.",
+    "It was not loaded again",
+  ]);
+  await expect(page.locator(".gerber-layer-item")).toHaveCount(0);
+
+  await page.reload();
+  await expect(page.locator(".gerber-layer-item")).toHaveCount(1, { timeout: 30_000 });
+  await expect(page.locator("#diagnostics-count")).toHaveText("0");
+});
+
+test("an interrupted file upload is reported without loading anything", async ({ page }) => {
+  await hideMemory64(page);
+  await seedInterruptedLoad(page, {
+    names: ["top.gtl", "bottom.gbl", "drill.drl"],
+    nameCount: 3,
+    sourceUrl: null,
+  });
+  await page.goto("/");
+  await expectNotice(page, "Unsupported browser", [
+    "Loading top.gtl, bottom.gbl and 1 more file stopped this page before it finished",
+    "Safari does not support it yet.",
+  ]);
+  await expect(page.locator("#warning-message")).not.toContainText("It was not loaded again");
+});
+
+test("on an iPhone the notice sends the user to a computer", async ({ browser }) => {
+  const context = await browser.newContext({ userAgent: IPHONE_USER_AGENT });
+  const page = await context.newPage();
+  await hideMemory64(page);
+  await seedInterruptedLoad(page, { names: ["dense.gbr"], nameCount: 1, sourceUrl: null });
+  await page.goto("/");
+  await expectNotice(page, "Unsupported browser", [
+    "Open it on a computer, in a browser that supports WebAssembly memory64:",
+    "Chrome 133 or later",
+    "On iPhone and iPad every browser uses Safari's engine, which does not support it yet.",
+  ]);
+  await context.close();
+});
+
+test("a load that finishes or is left on purpose leaves no marker", async ({ page }) => {
+  await page.goto("/");
+  await loadFiles(page, [gerber("pad.gtl", padSource())]);
+  expect(await page.evaluate((key) => sessionStorage.getItem(key), LOAD_MARKER_KEY)).toBeNull();
+
+  await page.evaluate((key) => sessionStorage.setItem(key, JSON.stringify({
+    names: ["left.gbr"], nameCount: 1, sourceUrl: null, startedAt: Date.now(),
+  })), LOAD_MARKER_KEY);
+  // A reload is a page the user left on purpose, not a crash.
+  await page.reload();
+  await expect(page.locator("#workspace-status")).toHaveText("Ready");
+  await expect(page.locator("#diagnostics-count")).toHaveText("0");
+});
+
 // Serves the wasm32 glue to the workers with a parser that fails the way an
 // exhausted wasm32 instance does for sources carrying a marker comment.
 async function failWasm32Parser(page) {
@@ -416,6 +565,11 @@ async function failWasm32Parser(page) {
             throw new Error(
               "Gerber layer is too large to parse: not enough memory for primitives (forced)",
             );
+          }
+          if (content.includes("WASM32-HANG")) {
+            // Stands in for a parse the browser kills the page during.
+            const until = Date.now() + 120000;
+            while (Date.now() < until) {}
           }
           if (content.includes("WASM32-TRAP-LARGE")) {
             // Trap only after the instance has grown the way a real
