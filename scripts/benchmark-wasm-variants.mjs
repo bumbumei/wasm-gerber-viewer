@@ -4,15 +4,18 @@
 //   mixed   (default)   memory64 main instance, wasm32 parse workers
 //
 // It loads generated Gerber layers through the real viewer page and reports
-// load time, per-layer worker time, main-thread time and memory, then times
-// the parser, the main-instance add_layer path and a frame directly on each
-// build. Run it on a hardware GPU; headless Chromium defaults to SwiftShader.
+// load time, per-layer worker time, main-thread time, memory and the time to
+// draw the loaded scene, then times the parser, the main-instance add_layer
+// path and a frame directly on each build. Run it on a hardware GPU; headless
+// Chromium defaults to SwiftShader.
 //
 //   node scripts/benchmark-wasm-variants.mjs
 //
 // Environment:
 //   WASM_BENCHMARK_ROUNDS    viewer loads per configuration (default 5)
 //   WASM_BENCHMARK_CONFIGURATIONS  subset to load, e.g. "wasm32,mixed"
+//   WASM_BENCHMARK_BASELINE_DIR  checkout of another version (with wasm/pkg
+//                            built), such as main, to measure as "baseline"
 //   WASM_BENCHMARK_SCALE     multiplies the generated layer sizes (default 1)
 //   WASM_BENCHMARK_PORT      static server port (default 4186)
 //   WASM_BENCHMARK_CHANNEL   Playwright browser channel (default bundled Chromium)
@@ -32,19 +35,24 @@ const scale = Number(process.env.WASM_BENCHMARK_SCALE ?? 1);
 const channel = process.env.WASM_BENCHMARK_CHANNEL;
 const allowSoftware = process.env.WASM_BENCHMARK_ALLOW_SOFTWARE === "1";
 const baseUrl = `http://127.0.0.1:${port}`;
+const baselineDir = process.env.WASM_BENCHMARK_BASELINE_DIR;
+const baselineUrl = `http://127.0.0.1:${port + 1}`;
 const selectedConfigurations = (process.env.WASM_BENCHMARK_CONFIGURATIONS ?? "")
   .split(",")
   .filter(Boolean);
+// A baseline checkout may have a single wasm32 build and no ?wasm= parameter.
 const CONFIGURATIONS = [
-  { name: "wasm32", query: "?wasm=32" },
-  { name: "wasm64", query: "?wasm=64" },
-  { name: "mixed", query: "" },
+  ...(baselineDir ? [{ name: "baseline", base: baselineUrl, query: "", baseline: true }] : []),
+  { name: "wasm32", base: baseUrl, query: "?wasm=32" },
+  { name: "wasm64", base: baseUrl, query: "?wasm=64" },
+  { name: "mixed", base: baseUrl, query: "" },
 ].filter(
   ({ name }) => selectedConfigurations.length === 0 || selectedConfigurations.includes(name),
 );
 const BUILDS = [
-  { name: "wasm32", dir: "pkg" },
-  { name: "wasm64", dir: "pkg64" },
+  ...(baselineDir ? [{ name: "baseline", base: baselineUrl, dir: "pkg" }] : []),
+  { name: "wasm32", base: baseUrl, dir: "pkg" },
+  { name: "wasm64", base: baseUrl, dir: "pkg64" },
 ];
 
 // --- Generated layers -------------------------------------------------------
@@ -218,31 +226,44 @@ async function measureViewerLoad(browser, configuration, workload) {
     if (message.type() === "error") errors.push(message.text());
   });
   await page.addInitScript(installViewerProbes);
-  await page.goto(`${baseUrl}/${configuration.query}`, { waitUntil: "networkidle" });
-  await page.waitForFunction(() => document.documentElement.dataset.wasmMain);
+  await page.goto(`${configuration.base}/${configuration.query}`, { waitUntil: "networkidle" });
+  await page.waitForFunction((baseline) =>
+    baseline
+      ? performance.getEntriesByType("resource").some((entry) => entry.name.endsWith("_bg.wasm"))
+      : document.documentElement.dataset.wasmMain,
+  Boolean(configuration.baseline));
 
   // Time the main-instance calls that receive parsed layers or parse on the
-  // main thread. The page-side import returns the instance the viewer uses.
+  // main thread, and keep the last draw call to replay. The page-side import
+  // returns the instance the viewer uses.
   await page.evaluate(async () => {
     const dir = document.documentElement.dataset.wasmMain === "wasm64" ? "pkg64" : "pkg";
     const main = await import(`/wasm/${dir}/wasm_gerber_processor.js`);
     const wasm = await main.default();
     const calls = {};
+    const prototype = main.GerberProcessor.prototype;
     for (const name of [
       "add_render_payload",
       "add_interaction_payload",
       "add_layer",
       "add_drill_layer",
     ]) {
-      const original = main.GerberProcessor.prototype[name];
+      const original = prototype[name];
       calls[name] = 0;
-      main.GerberProcessor.prototype[name] = function timed(...args) {
+      prototype[name] = function timed(...args) {
         const startedAt = performance.now();
         try {
           return original.apply(this, args);
         } finally {
           calls[name] += performance.now() - startedAt;
         }
+      };
+    }
+    for (const name of ["render", "render_with_clear_and_blend_modes"]) {
+      const original = prototype[name];
+      prototype[name] = function remember(...args) {
+        window.__bench.lastRender = { name, original, processor: this, args };
+        return original.apply(this, args);
       };
     }
     window.__bench.mainCalls = calls;
@@ -258,13 +279,36 @@ async function measureViewerLoad(browser, configuration, workload) {
     workload.files.length,
     { timeout: 30_000 },
   );
-  const result = await page.evaluate(() => {
+  const result = await page.evaluate(async () => {
     const { tasks, mainCalls, mainMemory, mainMemoryBefore } = window.__bench;
+    // Draw the loaded scene again as the viewer last drew it, nudging the zoom
+    // so that no frame repeats the one before, and wait for the GPU each time.
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const last = window.__bench.lastRender;
+    let frameMs = null;
+    if (last) {
+      const gl = document.getElementById("gerber-canvas").getContext("webgl2");
+      const zoomIndex = last.name === "render" ? 2 : 3;
+      const frames = [];
+      for (let frame = 0; frame < 105; frame += 1) {
+        const args = [...last.args];
+        const zoom = 1 + (frame % 2) * 1e-4;
+        args[zoomIndex] *= zoom;
+        args[zoomIndex + 1] *= zoom;
+        const startedAt = performance.now();
+        last.original.apply(last.processor, args);
+        gl.finish();
+        if (frame >= 5) frames.push(performance.now() - startedAt);
+      }
+      frames.sort((left, right) => left - right);
+      frameMs = frames[frames.length >> 1];
+    }
     return {
       tasks,
       mainCalls,
       mainMemoryBytes: mainMemory(),
       mainMemoryBefore,
+      frameMs,
       dataset: { ...document.documentElement.dataset },
       diagnostics: Number(document.getElementById("diagnostics-count").textContent),
     };
@@ -292,10 +336,13 @@ function summarizeLoads(samples) {
       median(samples.map((sample) => Math.max(0, ...sample.tasks.map((task) => task.workerBytes)))),
     ),
     mainMemoryMiB: toMiB(median(samples.map((sample) => sample.mainMemoryBytes))),
+    sceneFrameMs: round(median(samples.map((sample) => sample.frameMs ?? Number.NaN)), 2),
     mainAddRenderPayloadMs: mainCall("add_render_payload"),
     mainAddInteractionPayloadMs: mainCall("add_interaction_payload"),
     mainAddDrillLayerMs: mainCall("add_drill_layer"),
-    builds: `${samples[0].dataset.wasmMain} main / ${samples[0].dataset.wasmWorker} workers`,
+    builds: samples[0].dataset.wasmMain
+      ? `${samples[0].dataset.wasmMain} main / ${samples[0].dataset.wasmWorker} workers`
+      : "single wasm32 build",
   };
 }
 
@@ -305,7 +352,7 @@ function summarizeLoads(samples) {
 async function measureBuild(browser, build, texts) {
   const context = await browser.newContext();
   const page = await context.newPage();
-  await page.goto(`${baseUrl}/tests/fixtures/benchmark.html`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${build.base}/tests/fixtures/benchmark.html`, { waitUntil: "domcontentloaded" });
   const result = await page.evaluate(
     async ({ dir, texts }) => {
       const median = (values) => [...values].sort((left, right) => left - right)[values.length >> 1];
@@ -321,7 +368,8 @@ async function measureBuild(browser, build, texts) {
       const processor = new module.GerberProcessor();
       processor.init_with_size(gl, width, height);
       const out = {
-        addressBits: module.memory_address_bits(),
+        // Builds older than memory64 support have no such export.
+        addressBits: module.memory_address_bits?.() ?? 32,
         vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
         renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
         files: {},
@@ -393,10 +441,19 @@ const server = spawn(process.execPath, ["scripts/static-server.mjs"], {
   },
   stdio: ["ignore", "ignore", "inherit"],
 });
+// The same static server, rooted at the other checkout.
+const baselineServer = baselineDir
+  ? spawn(process.execPath, [join(process.cwd(), "scripts/static-server.mjs")], {
+      cwd: baselineDir,
+      env: { ...process.env, GERBER_VIEWER_TEST_PORT: String(port + 1) },
+      stdio: ["ignore", "ignore", "inherit"],
+    })
+  : null;
 
 let browser;
 try {
   await waitForServer(`${baseUrl}/index.html`);
+  if (baselineServer) await waitForServer(`${baselineUrl}/index.html`);
   browser = await chromium.launch({
     ...(channel ? { channel } : {}),
     args: [
@@ -410,7 +467,7 @@ try {
   const texts = Object.fromEntries(
     [...gerberNames, "region-72K"].map((name) => [name, readFileSync(paths[name], "utf8")]),
   );
-  const buildRounds = { wasm32: [], wasm64: [] };
+  const buildRounds = Object.fromEntries(BUILDS.map(({ name }) => [name, []]));
   for (let roundIndex = 0; roundIndex < 3; roundIndex += 1) {
     for (const build of roundIndex % 2 === 0 ? BUILDS : [...BUILDS].reverse()) {
       buildRounds[build.name].push(await measureBuild(browser, build, texts));
@@ -480,5 +537,6 @@ try {
 } finally {
   await browser?.close();
   server.kill();
+  baselineServer?.kill();
   rmSync(dataDir, { recursive: true, force: true });
 }
