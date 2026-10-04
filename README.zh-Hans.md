@@ -25,7 +25,7 @@
 - 性能测试 - Stars: [1K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-stars-1K.gbr), [10K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-stars-10K.gbr), [100K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-100K.gbr), [1M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr), [5M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=5&repeatOffsetX=70), [10M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=10&repeatOffsetX=70), [20M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=20&repeatOffsetX=70), [50M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=50&repeatOffsetX=70), [100M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=100&repeatOffsetX=0.007)
 - 性能测试 - Single region: [72K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-region-72K.gbr), [648K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-region-648K.gbr), [1.8M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-region-1.8M.gbr)
 - 性能测试 - Arc region: [1.3M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-arc-region-1.3M.gbr)
-- Memory64 测试 - Pads，使用超过 4 GiB 内存: [24M](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fbumbumei.github.io%2Fwasm-gerber-viewer%2Fdemo%2Fmemory64-test-pads-24M.gbr)
+- Memory64 测试 - Pads，使用超过 4 GiB 内存: [24M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fmemory64-test-pads-24M.gbr)
 
 ## 功能特性
 
@@ -187,6 +187,21 @@ wasm-gerber-viewer/
 浏览器不受支持，并列出可以打开该文件的浏览器。浏览器也可能在加载过程中关闭页面
 （iOS Safari 内存不足时会关闭页面再重新打开），重新打开的页面不会再次加载同一个
 `?url=`，而是说明发生了什么。
+
+| 浏览器 | 主实例 | 主实例内存上限 |
+|-|-|-|
+| Chrome、Edge 133+（桌面、Android） | memory64（解析 worker 为 wasm32） | 约 15.5 GiB |
+| Firefox 134+（桌面、Android） | memory64（解析 worker 为 wasm32） | 约 15.5 GiB |
+| Chrome、Edge 96–132，Firefox 114–133 | wasm32 | 约 3.5 GiB |
+| Safari 16.4+（macOS） | wasm32 | 约 3.5 GiB |
+| iPhone、iPad 上的所有浏览器（iOS 16.4+） | wasm32（均使用 WebKit） | 约 3.5 GiB；iOS 可能更早关闭页面 |
+
+上限是查看器停止接受新图层的位置，比引擎允许的大小（wasm32 为 4 GiB，memory64
+为 16 GiB）少 512 MiB；实际上设备内存可能先耗尽。在 `navigator.deviceMemory`
+报告小于 8 GiB 的设备上，memory64 上限会降到该值（不低于 3.5 GiB）。memory64 的
+支持版本依据 MDN 兼容性数据（`webassembly.memory64`）：Opera、Samsung Internet
+等基于 Chromium 133+ 的浏览器与 Chrome 相同，Safari 目前仅在 Technology Preview
+中支持 memory64。
 
 在查看器 URL 后加上 `?wasm=32` 或 `?wasm=64`，可以让所有实例都运行同一个构建。
 单个文件 300 MiB 的限制以及 WebGL 对单个缓冲区的限制保持不变。

@@ -25,7 +25,7 @@ PCB 시각화를 위한 WASM/WebGL2 기반 Gerber 파일 뷰어입니다.
 - Performance test - Stars: [1K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-stars-1K.gbr), [10K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-stars-10K.gbr), [100K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-100K.gbr), [1M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr), [5M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=5&repeatOffsetX=70), [10M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=10&repeatOffsetX=70), [20M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=20&repeatOffsetX=70), [50M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=50&repeatOffsetX=70), [100M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=100&repeatOffsetX=0.007)
 - Performance test - Single region: [72K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-region-72K.gbr), [648K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-region-648K.gbr), [1.8M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-region-1.8M.gbr)
 - Performance test - Arc region: [1.3M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-arc-region-1.3M.gbr)
-- Memory64 test - Pads, 4 GiB 이상의 메모리 사용: [24M](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fbumbumei.github.io%2Fwasm-gerber-viewer%2Fdemo%2Fmemory64-test-pads-24M.gbr)
+- Memory64 test - Pads, 4 GiB 이상의 메모리 사용: [24M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fmemory64-test-pads-24M.gbr)
 
 ## 기능
 
@@ -191,6 +191,22 @@ wasm32를 그대로 쓰고, wasm32 파서가 메모리 부족으로 실패한 �
 브라우저가 페이지를 닫아 버리는 경우도 있는데(iOS Safari는 메모리가 부족하면
 페이지를 닫았다가 다시 엽니다), 이때 다시 열린 페이지는 같은 `?url=`을 또
 불러오지 않고 무슨 일이 있었는지 안내합니다.
+
+| 브라우저 | 메인 인스턴스 | 메인 인스턴스 메모리 한도 |
+|-|-|-|
+| Chrome·Edge 133+ (데스크톱, Android) | memory64 (파싱 워커는 wasm32) | 약 15.5 GiB |
+| Firefox 134+ (데스크톱, Android) | memory64 (파싱 워커는 wasm32) | 약 15.5 GiB |
+| Chrome·Edge 96–132, Firefox 114–133 | wasm32 | 약 3.5 GiB |
+| Safari 16.4+ (macOS) | wasm32 | 약 3.5 GiB |
+| iPhone·iPad의 모든 브라우저 (iOS 16.4+) | wasm32 (모두 WebKit 사용) | 약 3.5 GiB, iOS가 그 전에 페이지를 닫을 수 있음 |
+
+한도는 뷰어가 레이어를 더 받지 않는 지점으로, 엔진이 허용하는 크기(wasm32는
+4 GiB, memory64는 16 GiB)보다 512 MiB 작습니다. 실제로는 기기 RAM이 먼저 부족할
+수 있습니다. `navigator.deviceMemory`가 8 GiB 미만으로 보고되는 기기에서는
+memory64 한도를 그 값으로 낮춥니다(최소 3.5 GiB). memory64 지원 버전은 MDN 호환성
+데이터(`webassembly.memory64`)를 따릅니다. Opera, Samsung Internet처럼 Chromium
+133 이상을 쓰는 브라우저도 Chrome과 같이 동작하며, Safari는 아직 Technology
+Preview에서만 memory64를 지원합니다.
 
 뷰어 URL에 `?wasm=32` 또는 `?wasm=64`를 붙이면 모든 인스턴스가 한 빌드로
 실행됩니다. 파일당 300 MiB 제한과 단일 버퍼에 대한 WebGL 제한은 그대로입니다.

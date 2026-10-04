@@ -25,7 +25,7 @@ WASM/WebGL2-based Gerber file viewer for PCB visualization.
 - Performance test - Stars: [1K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-stars-1K.gbr), [10K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-stars-10K.gbr), [100K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-100K.gbr), [1M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr), [5M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=5&repeatOffsetX=70), [10M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=10&repeatOffsetX=70), [20M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=20&repeatOffsetX=70), [50M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=50&repeatOffsetX=0.007)
 - Performance test - Single region: [72K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-region-72K.gbr), [648K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-region-648K.gbr), [1.8M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-region-1.8M.gbr)
 - Performance test - Arc region: [1.3M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-arc-region-1.3M.gbr)
-- Memory64 test - Pads, uses more than 4 GiB of memory: [24M](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fbumbumei.github.io%2Fwasm-gerber-viewer%2Fdemo%2Fmemory64-test-pads-24M.gbr)
+- Memory64 test - Pads, uses more than 4 GiB of memory: [24M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fmemory64-test-pads-24M.gbr)
 
 ## Features
 
@@ -191,6 +191,22 @@ needs more than 4 GiB, the viewer says so and lists the browsers that can load
 it. A browser may also close the page during such a load (iOS Safari does when
 it runs out of memory, then reopens it); the reopened page explains what
 happened instead of loading the same `?url=` again.
+
+| Browser | Main instance | Main-instance memory limit |
+|-|-|-|
+| Chrome, Edge 133+ (desktop, Android) | memory64 (parse workers wasm32) | about 15.5 GiB |
+| Firefox 134+ (desktop, Android) | memory64 (parse workers wasm32) | about 15.5 GiB |
+| Chrome, Edge 96–132, Firefox 114–133 | wasm32 | about 3.5 GiB |
+| Safari 16.4+ (macOS) | wasm32 | about 3.5 GiB |
+| Every browser on iPhone and iPad (iOS 16.4+) | wasm32 (all use WebKit) | about 3.5 GiB; iOS may close the page sooner |
+
+The limit is where the viewer stops accepting layers, 512 MiB short of what the
+engine allows (4 GiB for wasm32, 16 GiB for memory64); the device can run out
+of RAM first. Where `navigator.deviceMemory` reports less than 8 GiB, the
+memory64 limit drops to that value (never below 3.5 GiB). memory64 versions
+follow MDN's compatibility data (`webassembly.memory64`): other browsers on
+Chromium 133+, such as Opera and Samsung Internet, behave like Chrome, and
+Safari supports memory64 only in Technology Preview so far.
 
 Add `?wasm=32` or `?wasm=64` to the viewer URL to run every instance on one
 build. The 300 MiB limit per file and the WebGL limits on a single buffer are
