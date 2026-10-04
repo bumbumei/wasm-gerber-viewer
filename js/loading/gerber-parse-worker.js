@@ -232,6 +232,12 @@ self.addEventListener("message", async (event) => {
       trapped:
         typeof WebAssembly !== "undefined" &&
         error instanceof WebAssembly.RuntimeError,
+      // The Err values this crate creates reach JS as strings, thrown after
+      // the call has returned normally. Any other thrown value (a trap from a
+      // panic or a failed allocation, a stack overflow, an exception thrown
+      // through the module) is taken as a call left part-way, without
+      // unwinding its stack or running destructors.
+      instanceIntact: typeof error === "string",
       workerMemory: {
         beforeBytes,
         afterBytes: getWorkerWasmMemoryBytes(),

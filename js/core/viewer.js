@@ -836,6 +836,12 @@ class GerberParseWorkerPool {
         return;
       }
 
+      // A parse that did not return normally may have left the instance with
+      // half-updated state and memory nothing will free; the next layer must
+      // not inherit it, whether or not this one is retried.
+      if (!event.data.instanceIntact) {
+        shouldRecycle = true;
+      }
       if (this.fallbackWasmVariant && event.data.memoryExhausted) {
         // The instance that ran out of memory may have trapped mid-parse.
         shouldRecycle = true;

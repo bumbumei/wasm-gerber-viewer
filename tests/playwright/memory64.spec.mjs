@@ -573,11 +573,11 @@ async function failWasm32Parser(page) {
         import init, * as real from "/wasm/pkg/wasm_gerber_processor.js?real";
         export * from "/wasm/pkg/wasm_gerber_processor.js?real";
         export default init;
+        // Parser errors are thrown as strings, the way the module throws a
+        // Rust Err; the traps below are thrown as RuntimeErrors.
         function fail(content) {
           if (content.includes("WASM32-OUT-OF-MEMORY")) {
-            throw new Error(
-              "Gerber layer is too large to parse: not enough memory for primitives (forced)",
-            );
+            throw "Gerber layer is too large to parse: not enough memory for primitives (forced)";
           }
           if (content.includes("WASM32-HANG")) {
             // Stands in for a parse the browser kills the page during.
@@ -594,9 +594,7 @@ async function failWasm32Parser(page) {
             throw new WebAssembly.RuntimeError("unreachable (forced)");
           }
           if (content.includes("WASM32-ITEM-LIMIT")) {
-            throw new Error(
-              "Gerber generated geometry exceeds the supported limit of 60000000 items while processing flash (forced)",
-            );
+            throw "Gerber generated geometry exceeds the supported limit of 60000000 items while processing flash (forced)";
           }
         }
         export function parse_gerber_layer_payload_with_options(content, ...rest) {
@@ -693,6 +691,65 @@ test("a layer that fails on both builds reports both failures", async ({ page })
   expect(diagnostics).toContain("wasm64 retry after wasm32 failed");
   // memory64 was there and could not help, so no browser advice.
   await expect(page.locator("#warning-title")).not.toHaveText(/Unsupported browser|More than 4 GiB/);
+});
+
+// One parse worker, so every layer goes to the same worker unless the pool
+// replaces it, and a record of the tasks each worker receives, counting
+// those that arrive after it trapped.
+async function recordParseWorkers(page) {
+  await page.addInitScript(() => {
+    Object.defineProperty(Navigator.prototype, "hardwareConcurrency", { get: () => 2 });
+    const NativeWorker = window.Worker;
+    window.__parseWorkers = [];
+    window.Worker = class RecordingWorker extends NativeWorker {
+      constructor(...args) {
+        super(...args);
+        const record = { tasks: 0, tasksAfterTrap: 0, trapped: false };
+        window.__parseWorkers.push(record);
+        const post = this.postMessage.bind(this);
+        this.postMessage = (message, ...rest) => {
+          if (typeof message?.content === "string") {
+            record.tasks += 1;
+            if (record.trapped) record.tasksAfterTrap += 1;
+          }
+          return post(message, ...rest);
+        };
+        this.addEventListener("message", (event) => {
+          if (event.data?.ok === false && event.data.trapped) record.trapped = true;
+        });
+      }
+    };
+  });
+}
+
+const sixPads = () =>
+  Array.from({ length: 6 }, (_, index) => gerber(`pad-${index}.gbl`, padSource(`pad ${index}`)));
+
+test("a worker whose parse trapped gets no further layer, even with nothing to retry on", async ({ page }) => {
+  await failWasm32Parser(page);
+  await recordParseWorkers(page);
+  // Pinned to wasm32, so the pool has no memory64 build to retry on.
+  await page.goto("/?wasm=32");
+  await uploadFiles(page, [gerber("trapped.gtl", padSource("WASM32-TRAP")), ...sixPads()]);
+  await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+  await expect(page.locator(".gerber-layer-item")).toHaveCount(6);
+
+  const workers = await page.evaluate(() => window.__parseWorkers);
+  expect(workers.filter((worker) => worker.trapped)).toHaveLength(1);
+  expect(workers.map((worker) => worker.tasksAfterTrap)).toEqual(workers.map(() => 0));
+});
+
+test("a parser error that returned normally keeps its worker", async ({ page }) => {
+  await recordParseWorkers(page);
+  await page.goto("/?wasm=32");
+  await uploadFiles(page, [gerber("empty.gtl", "%FSLAX24Y24*%\n%MOMM*%\nM02*"), ...sixPads()]);
+  await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+  await expect(page.locator(".gerber-layer-item")).toHaveCount(6);
+  expect(await diagnosticsText(page)).toContain("no geometry found");
+
+  // The one worker parsed all seven files.
+  const workers = await page.evaluate(() => window.__parseWorkers);
+  expect(workers.map((worker) => worker.tasks)).toEqual([7]);
 });
 
 test("with every instance on wasm32 a memory failure is final", async ({ page }) => {
