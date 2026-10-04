@@ -3432,6 +3432,9 @@ export class GerberViewer {
                 parsedLayer: parseResult.renderPayload,
                 interactionPayload: parseResult.interactionPayload,
               });
+              // The list owns the payloads now (see the staging loop below).
+              parseResult.renderPayload = null;
+              parseResult.interactionPayload = null;
             } catch (error) {
               this.handleLayerLoadError(layer.name, error);
               throw new Error(
@@ -3503,6 +3506,11 @@ export class GerberViewer {
           if (isGerberLayer(layerRecord)) {
             layerRecord.interactionPayload = layer.interactionPayload ?? null;
           }
+          // The record owns the picking payload from here, and the render
+          // payload is in the staged processor; drop this list's references
+          // so the index build can release each payload once it is imported.
+          layer.parsedLayer = null;
+          layer.interactionPayload = null;
           this.prepareLayerMetadata(layerRecord);
           stagedLayers.push(layerRecord);
 
@@ -4931,11 +4939,17 @@ export class GerberViewer {
           this.reportMemory64Reparse(name, parseResult);
           renderPayload = parseResult.renderPayload;
           interactionPayload = parseResult.interactionPayload ?? null;
+          parseResult.renderPayload = null;
+          parseResult.interactionPayload = null;
           layerRecord = await this.addParsedLayer(name, renderPayload, {
             offset: source.offset,
             sourceContent: content,
           });
+          // The renderer has its own copy of the geometry, and the record
+          // holds the picking payload only until its index is built.
+          renderPayload = null;
           layerRecord.interactionPayload = interactionPayload;
+          interactionPayload = null;
           if (
             this.pendingFatalWasmRecovery ||
             this.isRecoveringWasmProcessor ||
@@ -5107,6 +5121,9 @@ export class GerberViewer {
         if (!processorIsCurrent()) return;
         this.reservePickingIndexMemory(layer.interactionPayload);
         processor.add_interaction_payload(layer.layerId, layer.interactionPayload);
+        // The main instance has its own copy now; holding the JS payload
+        // until every layer is indexed would only raise the peak.
+        layer.interactionPayload = null;
       }
 
       this.featurePickingAvailable = true;
