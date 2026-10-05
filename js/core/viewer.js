@@ -89,6 +89,21 @@ const RECYCLE_PARSE_WORKER_MEMORY_BYTES = 256 * BYTES_PER_MIB;
 const RECYCLE_PARSE_WORKER_GROWTH_BYTES = 128 * BYTES_PER_MIB;
 // Long enough to read the list of browsers; the notice can also be closed.
 const MEMORY_LIMIT_NOTICE_DURATION_MS = 20_000;
+// Share of a worker parse each stage it reports covers. On a laptop, layers
+// of 3 million flashes, 6 million step-and-repeat pads and 72,000 regions all
+// spent 85-90% of the parse running commands, about 5% building render
+// buffers and 5-10% copying the result out.
+const PARSE_STAGE_SPANS = {
+  commands: [0, 0.85],
+  geometry: [0.85, 0.9],
+  packing: [0.9, 1],
+};
+// Share of loading one layer that is its parse; adding it to the renderer
+// took the remaining 3-6% on those layers. Building the picking index
+// afterwards is counted on its own.
+const LAYER_PARSE_SHARE = 0.95;
+// Render data from which adding a layer takes long enough to show its stage.
+const SLOW_LAYER_ADD_BYTES = 32 * BYTES_PER_MIB;
 const ARC_TESSELLATION_QUALITY_LEVELS = {
   low: 0,
   normal: 1,
@@ -472,6 +487,42 @@ function clampProgress(value) {
   return Math.min(1, Math.max(0, value));
 }
 
+/**
+ * How much of a layer's parse a worker progress report stands for. Each stage
+ * covers the share of the parse it took on large layers.
+ */
+function getParseProgressFraction({ stage, done, total } = {}) {
+  const span = PARSE_STAGE_SPANS[stage];
+  if (!span) return 0;
+  const [start, end] = span;
+  return start + (end - start) * clampProgress(done / total);
+}
+
+/**
+ * Loading-modal stage while a layer parses, or parses again with memory64
+ * after wasm32 ran out of memory.
+ */
+function getParseStageLabel(retry = false) {
+  return retry ? "Parsing again with memory64" : "Parsing";
+}
+
+/**
+ * Resolves once the browser has painted the page as it is now, so a status
+ * shown just before a long synchronous WASM call stays on screen while the
+ * call runs. Waiting for an animation frame alone is not enough: code that
+ * continues from the frame callback runs before that frame is painted. A
+ * hidden page gets no frames and only yields.
+ */
+function waitForPaint() {
+  return new Promise((resolve) => {
+    if (document.visibilityState === "hidden") {
+      setTimeout(resolve, 0);
+      return;
+    }
+    requestAnimationFrame(() => setTimeout(resolve, 0));
+  });
+}
+
 function normalizeLayerOffset(offset = {}) {
   const x = Number(offset.x ?? 0);
   const y = Number(offset.y ?? 0);
@@ -713,8 +764,22 @@ class GerberParseWorkerPool {
 
   retryWithFallback(task, errorMessage) {
     task.fallbackReason = errorMessage;
+    // The parse starts over; until the retry reports, it has done nothing.
+    this.reportTaskProgress(task, { stage: "commands", done: 0, total: 1 }, true);
     this.fallbackQueue.push(task);
     this.pumpFallback();
+  }
+
+  /**
+   * Passes a worker's `{ stage, done, total }` report to the task's
+   * `onProgress`, with `retry` set while the fallback build parses it again.
+   */
+  reportTaskProgress(task, progress, retry = false) {
+    try {
+      task.onProgress?.({ ...progress, retry });
+    } catch (error) {
+      console.warn("[Parse] Progress callback failed:", error);
+    }
   }
 
   pumpFallback() {
@@ -746,6 +811,12 @@ class GerberParseWorkerPool {
       this.fallbackTask = task;
       worker.addEventListener("message", (event) => {
         if (event.data?.id !== task.id) return;
+        if (event.data.progress) {
+          if (this.fallbackTask === task) {
+            this.reportTaskProgress(task, event.data.progress, true);
+          }
+          return;
+        }
         if (event.data.ok) {
           finish(() =>
             task.resolve({
@@ -771,7 +842,11 @@ class GerberParseWorkerPool {
     }
   }
 
-  parse(content, offset, options = {}) {
+  /**
+   * Parses one layer in a worker. `onProgress({ stage, done, total, retry })`
+   * hears how far the parse has got; see parse_gerber_layer_payload_with_progress.
+   */
+  parse(content, offset, options = {}, onProgress = null) {
     if (this.isDisposed) {
       return Promise.reject(new Error("Parse worker pool has been disposed"));
     }
@@ -784,7 +859,15 @@ class GerberParseWorkerPool {
 
     const id = this.nextTaskId++;
     return new Promise((resolve, reject) => {
-      this.queue.push({ id, content, offset, options, resolve, reject });
+      this.queue.push({
+        id,
+        content,
+        offset,
+        options,
+        onProgress,
+        resolve,
+        reject,
+      });
       this.pump();
     });
   }
@@ -813,6 +896,10 @@ class GerberParseWorkerPool {
     if (!task || event.data?.id !== task.id) {
       return;
     }
+    if (event.data.progress) {
+      this.reportTaskProgress(task, event.data.progress);
+      return;
+    }
 
     this.activeTasks.delete(worker);
     let shouldRecycle = this.shouldRecycleWorker(event.data?.workerMemory);
@@ -836,6 +923,12 @@ class GerberParseWorkerPool {
         return;
       }
 
+      // A parse that did not return normally may have left the instance with
+      // half-updated state and memory nothing will free; the next layer must
+      // not inherit it, whether or not this one is retried.
+      if (!event.data.instanceIntact) {
+        shouldRecycle = true;
+      }
       if (this.fallbackWasmVariant && event.data.memoryExhausted) {
         // The instance that ran out of memory may have trapped mid-parse.
         shouldRecycle = true;
@@ -3432,6 +3525,9 @@ export class GerberViewer {
                 parsedLayer: parseResult.renderPayload,
                 interactionPayload: parseResult.interactionPayload,
               });
+              // The list owns the payloads now (see the staging loop below).
+              parseResult.renderPayload = null;
+              parseResult.interactionPayload = null;
             } catch (error) {
               this.handleLayerLoadError(layer.name, error);
               throw new Error(
@@ -3503,6 +3599,11 @@ export class GerberViewer {
           if (isGerberLayer(layerRecord)) {
             layerRecord.interactionPayload = layer.interactionPayload ?? null;
           }
+          // The record owns the picking payload from here, and the render
+          // payload is in the staged processor; drop this list's references
+          // so the index build can release each payload once it is imported.
+          layer.parsedLayer = null;
+          layer.interactionPayload = null;
           this.prepareLayerMetadata(layerRecord);
           stagedLayers.push(layerRecord);
 
@@ -3784,12 +3885,17 @@ export class GerberViewer {
     this.updateUiState();
   }
 
+  /**
+   * `current` of `total` items are done; `partial` adds the part of the
+   * items in progress that is done, in items (0.5 is half of one).
+   */
   updateLoadingModal({
     title = null,
     stage = null,
     fileName = null,
     current = null,
     total = null,
+    partial = 0,
     indeterminate = false,
   } = {}) {
     if (title !== null) {
@@ -3816,13 +3922,16 @@ export class GerberViewer {
       return;
     }
 
-    this.loadingProgressValue.textContent = "";
-    this.loadingProgressValue.hidden = true;
+    const partialValue = Number.isFinite(partial) ? partial : 0;
     const progressRatio =
-      totalValue && totalValue > 0 ? (currentValue ?? 0) / totalValue : 0;
-    this.loadingProgressBar.value = Math.round(
-      clampProgress(progressRatio) * 100,
-    );
+      totalValue && totalValue > 0
+        ? ((currentValue ?? 0) + partialValue) / totalValue
+        : 0;
+    const percent = clampProgress(progressRatio) * 100;
+    this.loadingProgressBar.value = Math.round(percent);
+    // Rounded down, so 100% means done.
+    this.loadingProgressValue.textContent = `${Math.floor(percent)}%`;
+    this.loadingProgressValue.hidden = false;
   }
 
   hideLoadingModal() {
@@ -4375,7 +4484,12 @@ export class GerberViewer {
         ? this.createParseWorkerPool(1)
         : null;
     return {
-      parse: async (content, offset, parseOptionOverrides = {}) => {
+      parse: async (
+        content,
+        offset,
+        parseOptionOverrides = {},
+        onProgress = null,
+      ) => {
         if (parseWorkerPool) {
           try {
             return await this.parseLayerContent(
@@ -4383,6 +4497,7 @@ export class GerberViewer {
               offset,
               parseWorkerPool,
               parseOptionOverrides,
+              onProgress,
             );
           } catch (error) {
             if (!isParseWorkerUnavailableError(error)) {
@@ -4573,7 +4688,6 @@ export class GerberViewer {
 
           this.readAndParseLayerSource(source, {
             index,
-            total,
             title,
             progress,
             parseWorkerPool,
@@ -4581,7 +4695,6 @@ export class GerberViewer {
             .then(async (parseResult) => {
               const layerRecord = await this.addParsedLayerSource(parseResult, {
                 title,
-                total,
                 progress,
               });
               if (isResolved) {
@@ -4601,14 +4714,12 @@ export class GerberViewer {
               if (isResolved) {
                 return;
               }
-              const completed = this.markLayerLoadComplete(progress);
+              this.markLayerLoadComplete(progress, index);
               this.handleLayerLoadError(source.name, error);
-              this.updateLoadingModal({
+              this.updateLayerLoadModal(progress, {
                 title,
                 stage: "Skipped",
                 fileName: source.name,
-                current: completed,
-                total,
               });
             })
             .finally(() => {
@@ -4645,19 +4756,65 @@ export class GerberViewer {
     return {
       total,
       completedLayers: 0,
+      // Layer index -> how much of that layer is loaded, from 0 to 1.
+      partialLayers: new Map(),
     };
   }
 
-  markLayerLoadComplete(progress) {
+  markLayerLoadComplete(progress, index = null) {
     if (!progress) {
       return 0;
     }
 
+    progress.partialLayers?.delete(index);
     progress.completedLayers = Math.min(
       progress.total,
       (progress.completedLayers ?? 0) + 1,
     );
     return progress.completedLayers;
+  }
+
+  /**
+   * Adding a large layer to the renderer blocks the page for a while; let the
+   * browser show the "Rendering" stage first. Smaller layers are added in
+   * well under a tenth of a second and are not worth a frame of waiting.
+   */
+  async waitForPaintBeforeAddingLayer(renderPayload) {
+    if (getTypedArrayBytes(renderPayload) >= SLOW_LAYER_ADD_BYTES) {
+      await waitForPaint();
+    }
+  }
+
+  /** Shows `fields` in the loading modal along with how far `progress` is. */
+  updateLayerLoadModal(progress, fields) {
+    let partial = 0;
+    for (const fraction of progress.partialLayers?.values() ?? []) {
+      partial += fraction;
+    }
+    this.updateLoadingModal({
+      ...fields,
+      current: progress.completedLayers,
+      total: progress.total,
+      partial,
+    });
+  }
+
+  /**
+   * Progress callback for a worker parse: moves the layer's share of the
+   * modal's bar through LAYER_PARSE_SHARE and says when memory64 parses the
+   * layer again.
+   */
+  createLayerParseProgressHandler(progress, { index, name }) {
+    return (report) => {
+      progress.partialLayers.set(
+        index,
+        LAYER_PARSE_SHARE * getParseProgressFraction(report),
+      );
+      this.updateLayerLoadModal(progress, {
+        stage: getParseStageLabel(report.retry),
+        fileName: name,
+      });
+    };
   }
 
   createParseWorkerPool(layerCount) {
@@ -4685,17 +4842,28 @@ export class GerberViewer {
     }
   }
 
+  /**
+   * Parses a layer in `parseWorkerPool`, or on the main instance without one.
+   * Only a worker parse calls `onProgress` (see GerberParseWorkerPool.parse):
+   * the main instance blocks the page until it is done.
+   */
   async parseLayerContent(
     content,
     offset,
     parseWorkerPool,
     parseOptionOverrides = {},
+    onProgress = null,
   ) {
     const normalizedOffset = normalizeLayerOffset(offset);
     const parseOptions = this.getParseOptions(parseOptionOverrides);
 
     if (parseWorkerPool) {
-      return parseWorkerPool.parse(content, normalizedOffset, parseOptions);
+      return parseWorkerPool.parse(
+        content,
+        normalizedOffset,
+        parseOptions,
+        onProgress,
+      );
     }
 
     const parsePayloadWithOptions =
@@ -4796,7 +4964,6 @@ export class GerberViewer {
     source,
     {
       index,
-      total,
       title,
       progress,
       parseWorkerPool,
@@ -4805,39 +4972,33 @@ export class GerberViewer {
     const { name, readText } = source;
 
     try {
-      this.updateLoadingModal({
+      this.updateLayerLoadModal(progress, {
         title,
         stage: "Reading",
         fileName: name,
-        current: progress.completedLayers,
-        total,
       });
 
       const content = await readText(() => {
-        this.updateLoadingModal({
+        this.updateLayerLoadModal(progress, {
           stage: "Reading",
           fileName: name,
-          current: progress.completedLayers,
-          total,
         });
       });
-      this.updateLoadingModal({
+      this.updateLayerLoadModal(progress, {
         stage: "Reading",
         fileName: name,
-        current: progress.completedLayers,
-        total,
       });
 
-      this.updateLoadingModal({
+      this.updateLayerLoadModal(progress, {
         stage: "Parsing",
         fileName: name,
-        current: progress.completedLayers,
-        total,
       });
       const parseResult = await this.parseLayerContent(
         content,
         source.offset,
         parseWorkerPool,
+        {},
+        this.createLayerParseProgressHandler(progress, { index, name }),
       );
       const {
         renderPayload,
@@ -4846,11 +5007,10 @@ export class GerberViewer {
       } = parseResult;
       this.reportOdbDiagnostics(name, odbDiagnostics);
       this.reportMemory64Reparse(name, parseResult);
-      this.updateLoadingModal({
-        stage: "Parsing",
+      progress.partialLayers.set(index, LAYER_PARSE_SHARE);
+      this.updateLayerLoadModal(progress, {
+        stage: getParseStageLabel(Boolean(parseResult.fallbackReason)),
         fileName: name,
-        current: progress.completedLayers,
-        total,
       });
 
       return {
@@ -4867,11 +5027,10 @@ export class GerberViewer {
         throw error;
       }
       this.handleLayerLoadError(name, error);
-      this.updateLoadingModal({
+      progress.partialLayers.delete(index);
+      this.updateLayerLoadModal(progress, {
         stage: "Skipped",
         fileName: name,
-        current: progress.completedLayers,
-        total,
       });
       return {
         ok: false,
@@ -4886,34 +5045,31 @@ export class GerberViewer {
     { index = 0, total = 1, title = "Loading files", serialParser = null } = {},
   ) {
     const { name, readText } = source;
+    // The layers before this one are loaded.
+    const progress = this.createLayerLoadProgress(total);
+    progress.completedLayers = index;
 
     try {
-      this.updateLoadingModal({
+      this.updateLayerLoadModal(progress, {
         title,
         stage: "Reading",
         fileName: name,
-        current: index,
-        total,
       });
 
       const content = await readText(() => {
-        this.updateLoadingModal({
+        this.updateLayerLoadModal(progress, {
           stage: "Reading",
           fileName: name,
-          current: index,
-          total,
         });
       });
 
-      this.updateLoadingModal({
+      this.updateLayerLoadModal(progress, {
         stage: "Parsing",
         fileName: name,
-        current: index,
-        total,
       });
-      // Yield one frame so the browser can repaint the progress modal before
-      // the synchronous WASM parse+interaction-build blocks the main thread.
-      await new Promise((resolve) => requestAnimationFrame(resolve));
+      // Let the browser paint the modal before a parse on the main instance
+      // blocks the page.
+      await waitForPaint();
 
       let layerRecord = null;
       if (isDrillSource(source)) {
@@ -4925,17 +5081,34 @@ export class GerberViewer {
         let interactionPayload = null;
         try {
           const parseResult = serialParser
-            ? await serialParser.parse(content, source.offset)
+            ? await serialParser.parse(
+                content,
+                source.offset,
+                {},
+                this.createLayerParseProgressHandler(progress, { index, name }),
+              )
             : await this.parseLayerContent(content, source.offset, null);
           this.reportOdbDiagnostics(name, parseResult.odbDiagnostics ?? null);
           this.reportMemory64Reparse(name, parseResult);
           renderPayload = parseResult.renderPayload;
           interactionPayload = parseResult.interactionPayload ?? null;
+          parseResult.renderPayload = null;
+          parseResult.interactionPayload = null;
+          progress.partialLayers.set(index, LAYER_PARSE_SHARE);
+          this.updateLayerLoadModal(progress, {
+            stage: "Rendering",
+            fileName: name,
+          });
+          await this.waitForPaintBeforeAddingLayer(renderPayload);
           layerRecord = await this.addParsedLayer(name, renderPayload, {
             offset: source.offset,
             sourceContent: content,
           });
+          // The renderer has its own copy of the geometry, and the record
+          // holds the picking payload only until its index is built.
+          renderPayload = null;
           layerRecord.interactionPayload = interactionPayload;
+          interactionPayload = null;
           if (
             this.pendingFatalWasmRecovery ||
             this.isRecoveringWasmProcessor ||
@@ -4973,33 +5146,28 @@ export class GerberViewer {
     parseResult,
     {
       title = "Loading files",
-      total = 1,
-      progress = null,
-    } = {},
+      progress,
+    },
   ) {
     const index = parseResult.index ?? 0;
     const name = parseResult.name;
 
     if (!parseResult.ok) {
-      const completed = this.markLayerLoadComplete(progress);
-      this.updateLoadingModal({
+      this.markLayerLoadComplete(progress, index);
+      this.updateLayerLoadModal(progress, {
         title,
         stage: "Skipped",
         fileName: name,
-        current: completed,
-        total,
       });
       return null;
     }
 
     if (this.wasmMemoryExhausted) {
-      const completed = this.markLayerLoadComplete(progress);
-      this.updateLoadingModal({
+      this.markLayerLoadComplete(progress, index);
+      this.updateLayerLoadModal(progress, {
         title,
         stage: "Skipped",
         fileName: name,
-        current: completed,
-        total,
       });
       parseResult.parsedLayer = null;
       parseResult.interactionPayload = null;
@@ -5008,13 +5176,12 @@ export class GerberViewer {
     }
 
     try {
-      this.updateLoadingModal({
+      this.updateLayerLoadModal(progress, {
         title,
         stage: "Rendering",
         fileName: name,
-        current: progress?.completedLayers ?? index,
-        total,
       });
+      await this.waitForPaintBeforeAddingLayer(parseResult.parsedLayer);
 
       const layerRecord = await this.createParsedLayerRecord(
         name,
@@ -5026,22 +5193,18 @@ export class GerberViewer {
         },
       );
       layerRecord.interactionPayload = parseResult.interactionPayload ?? null;
-      const completed = this.markLayerLoadComplete(progress);
-      this.updateLoadingModal({
+      this.markLayerLoadComplete(progress, index);
+      this.updateLayerLoadModal(progress, {
         stage: "Loaded",
         fileName: name,
-        current: completed,
-        total,
       });
       return layerRecord;
     } catch (error) {
-      const completed = this.markLayerLoadComplete(progress);
+      this.markLayerLoadComplete(progress, index);
       this.handleLayerLoadError(name, error);
-      this.updateLoadingModal({
+      this.updateLayerLoadModal(progress, {
         stage: "Skipped",
         fileName: name,
-        current: completed,
-        total,
       });
       return null;
     } finally {
@@ -5101,12 +5264,15 @@ export class GerberViewer {
           current: index,
           total: candidates.length,
         });
-        await new Promise((resolve) => requestAnimationFrame(resolve));
+        await waitForPaint();
         if (!processorIsCurrent()) return;
         this.ensureInteractionMemoryHeadroom();
         if (!processorIsCurrent()) return;
         this.reservePickingIndexMemory(layer.interactionPayload);
         processor.add_interaction_payload(layer.layerId, layer.interactionPayload);
+        // The main instance has its own copy now; holding the JS payload
+        // until every layer is indexed would only raise the peak.
+        layer.interactionPayload = null;
       }
 
       this.featurePickingAvailable = true;

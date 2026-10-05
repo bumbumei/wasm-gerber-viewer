@@ -2,6 +2,7 @@ mod aperture;
 mod aperture_macro;
 pub(crate) mod common;
 pub mod geometry;
+pub(crate) mod simd_scan;
 mod state;
 
 // Export only what's needed externally
@@ -39,6 +40,45 @@ pub struct PolarityLayer {
 pub struct ParsedGerberLayer {
     pub render_layers: Vec<GerberData>,
     pub interaction_layer: Option<InteractionLayer>,
+}
+
+/// Part of a parse that a progress callback hears about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParseStage {
+    /// Running the file's commands; the counts are bytes of the file read.
+    Commands,
+    /// Building render buffers from the parsed shapes; the counts are shapes.
+    Geometry,
+}
+
+impl ParseStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ParseStage::Commands => "commands",
+            ParseStage::Geometry => "geometry",
+        }
+    }
+}
+
+/// Called with a stage, the work of that stage done so far, and its total.
+pub type ParseProgress = Box<dyn FnMut(ParseStage, usize, usize)>;
+
+// A parse reports after reading this many bytes, or sooner once the commands
+// since the last report produced this many shapes: a flash inside a
+// step-and-repeat block can turn one command into thousands. Either way a
+// report costs little next to the work between two of them.
+const PROGRESS_BYTE_STEP: usize = 1 << 20;
+const PROGRESS_SHAPE_STEP: usize = 1 << 18;
+
+fn report_progress(
+    progress: &mut Option<ParseProgress>,
+    stage: ParseStage,
+    done: usize,
+    total: usize,
+) {
+    if let Some(progress) = progress {
+        progress(stage, done, total);
+    }
 }
 
 /// Iterator over the commands of a Gerber file.
@@ -108,7 +148,7 @@ impl<'a> Iterator for CommandSplitter<'a> {
                 });
             }
 
-            return Some(match segment.find('*') {
+            return Some(match simd_scan::find_star_simd(segment.as_bytes()) {
                 Some(star) => {
                     self.rest = &segment[star + 1..];
                     &segment[..=star]
@@ -133,13 +173,30 @@ impl<'a> Iterator for CommandSplitter<'a> {
 /// an extended command holds several `*` (harmless over-reservation), and it
 /// falls short only for malformed input such as an empty `%%` command or a
 /// macro body line without `*`, which `push_command` absorbs.
+#[cfg(test)]
 fn count_commands(data: &str) -> usize {
+    let bytes = data.as_bytes();
+    let last_percent = simd_scan::rfind_byte_simd(bytes, b'%');
+
+    let (head, tail) = match last_percent {
+        None => (&bytes[..0], bytes),
+        Some(pos) => {
+            // Find the newline after the last '%', or the end of the file, so any trailing
+            // percent_only_line is resolved before the SIMD chunk scan.
+            let split_at = match bytes[pos + 1..].iter().position(|&b| b == b'\n') {
+                Some(nl) => (pos + 1 + nl + 1).min(bytes.len()),
+                None => bytes.len(),
+            };
+            (&bytes[..split_at], &bytes[split_at..])
+        }
+    };
+
     let mut count = 0usize;
     let mut at_line_start = true;
     let mut percent_only_line = false;
     let mut last_significant = None;
 
-    for byte in data.bytes() {
+    for &byte in head {
         match byte {
             b'*' => {
                 count += 1;
@@ -169,6 +226,17 @@ fn count_commands(data: &str) -> usize {
         last_significant = Some(byte);
     }
 
+    if !tail.is_empty() {
+        count += simd_scan::count_stars_simd(tail);
+        if let Some(&byte) = tail
+            .iter()
+            .rev()
+            .find(|&&b| !matches!(b, b'\n' | b' ' | b'\t' | b'\r'))
+        {
+            last_significant = Some(byte);
+        }
+    }
+
     if percent_only_line {
         count += 1;
     } else if matches!(last_significant, Some(byte) if byte != b'*' && byte != b'%') {
@@ -179,6 +247,7 @@ fn count_commands(data: &str) -> usize {
     count
 }
 
+#[cfg(test)]
 /// Index every command of the file, reserving the index buffer once up front
 /// from the single-pass estimate of `count_commands`.
 fn collect_commands(data: &str) -> Result<Vec<&str>, JsValue> {
@@ -193,6 +262,7 @@ fn collect_commands(data: &str) -> Result<Vec<&str>, JsValue> {
     Ok(commands)
 }
 
+#[cfg(test)]
 fn push_command<'a>(commands: &mut Vec<&'a str>, command: &'a str) -> Result<(), JsValue> {
     // For well-formed input the up-front reservation already holds every
     // command and this never allocates. It only grows for malformed input that
@@ -994,6 +1064,7 @@ pub struct GerberParser {
     pub current_path_regions: PathRegions,
     pub region_contours: Vec<RegionContour>, // Contours collected in Region mode
     pub interaction_layer: Option<InteractionLayer>,
+    pub progress: Option<ParseProgress>,
 }
 
 impl GerberParser {
@@ -1018,6 +1089,7 @@ impl GerberParser {
             current_path_regions: PathRegions::empty(),
             region_contours: Vec::new(),
             interaction_layer: collect_interactions.then(InteractionLayer::new),
+            progress: None,
         }
     }
 
@@ -1032,15 +1104,34 @@ impl GerberParser {
             return self.finish_layers();
         }
 
-        let lines = collect_commands(data)?;
-        let length = lines.len();
-        let mut i = 0;
+        let mut commands_iter = split_commands(data);
+        let total_bytes = data.len();
+        report_progress(&mut self.progress, ParseStage::Commands, 0, total_bytes);
+        let mut reported_bytes = 0;
+        let mut reported_shapes = 0;
 
-        while i < length {
-            let line_ref = lines[i].trim();
+        while let Some(raw_line) = commands_iter.next() {
+            if let Some(progress) = &mut self.progress {
+                // Every command is a slice of `data`, so where it starts is how
+                // much of the file the parse has read.
+                let read_bytes = (raw_line.as_ptr() as usize)
+                    .saturating_sub(data.as_ptr() as usize)
+                    .min(total_bytes);
+                let shapes = self.current_primitives.len();
+                // A polarity change moves the shapes out; count again from there.
+                reported_shapes = reported_shapes.min(shapes);
+                if read_bytes.saturating_sub(reported_bytes) >= PROGRESS_BYTE_STEP
+                    || shapes - reported_shapes >= PROGRESS_SHAPE_STEP
+                {
+                    progress(ParseStage::Commands, read_bytes, total_bytes);
+                    reported_bytes = read_bytes;
+                    reported_shapes = shapes;
+                }
+            }
+
+            let line_ref = raw_line.trim();
 
             if line_ref.is_empty() {
-                i += 1;
                 continue;
             }
 
@@ -1051,9 +1142,7 @@ impl GerberParser {
             } else if line_ref.starts_with('%') {
                 parse_command(
                     line_ref,
-                    &mut i,
-                    length,
-                    &lines,
+                    &mut commands_iter,
                     &mut self.current_state,
                     &mut self.apertures,
                     &mut self.macros,
@@ -1091,9 +1180,13 @@ impl GerberParser {
                 )
                 .map_err(|message| JsValue::from_str(&message))?;
             }
-
-            i += 1;
         }
+        report_progress(
+            &mut self.progress,
+            ParseStage::Commands,
+            total_bytes,
+            total_bytes,
+        );
 
         self.finish_layers()
     }
@@ -1131,16 +1224,38 @@ impl GerberParser {
             polarity_layers.len(),
             "interaction path region sublayer map",
         )?;
+        let total_shapes = polarity_layers
+            .iter()
+            .map(|layer| layer.primitives.len())
+            .sum();
+        let mut done_shapes = 0;
+        report_progress(&mut self.progress, ParseStage::Geometry, 0, total_shapes);
         for layer in polarity_layers {
             let render_sublayer_idx = gerber_data_layers.len();
+            let layer_shapes = layer.primitives.len();
             let mut gerber_data = Self::primitives_to_gerber_data(
                 layer.primitives,
                 layer.path_regions,
                 layer.polarity == Polarity::Negative,
+                &mut |done| {
+                    report_progress(
+                        &mut self.progress,
+                        ParseStage::Geometry,
+                        done_shapes + done,
+                        total_shapes,
+                    )
+                },
             )?;
+            done_shapes += layer_shapes;
             sublayer_map.push(render_sublayer_idx);
             gerber_data_layers.append(&mut gerber_data);
         }
+        report_progress(
+            &mut self.progress,
+            ParseStage::Geometry,
+            total_shapes,
+            total_shapes,
+        );
         if let Some(interaction_layer) = &mut self.interaction_layer {
             interaction_layer.remap_path_region_sublayers(&sublayer_map)?;
         }
@@ -1156,17 +1271,22 @@ impl GerberParser {
         })
     }
 
-    /// Convert a vector of primitives to GerberData
+    /// Convert a vector of primitives to GerberData, telling `on_progress` how
+    /// many of them are done every `PROGRESS_SHAPE_STEP` primitives.
     fn primitives_to_gerber_data(
         primitives: Vec<Primitive>,
         path_regions: PathRegions,
         is_negative: bool,
+        on_progress: &mut dyn FnMut(usize),
     ) -> Result<Vec<GerberData>, JsValue> {
         let counts = SplitPrimitiveBufferCounts::from_primitives(&primitives);
         let mut plain_buffers = PrimitiveOutputBuffers::reserved_for(&counts.plain)?;
         let mut holed_buffers = PrimitiveOutputBuffers::reserved_for(&counts.holed)?;
 
-        for primitive in primitives {
+        for (index, primitive) in primitives.into_iter().enumerate() {
+            if index % PROGRESS_SHAPE_STEP == 0 && index > 0 {
+                on_progress(index);
+            }
             if primitive_has_hole(&primitive) {
                 holed_buffers.push_primitive(primitive)?;
             } else {
@@ -1197,9 +1317,7 @@ impl GerberParser {
 
 fn parse_command(
     line_ref: &str,
-    i: &mut usize,
-    length: usize,
-    lines: &[&str],
+    commands_iter: &mut dyn Iterator<Item = &str>,
     state: &mut ParserState,
     apertures: &mut HashMap<String, Aperture>,
     macros: &mut HashMap<String, ApertureMacro>,
@@ -1215,17 +1333,15 @@ fn parse_command(
         let mut buffer = String::new();
         try_reserve_string(&mut buffer, line_ref.len(), "extended command buffer")?;
         buffer.push_str(line_ref);
-        *i += 1;
 
-        while *i < length {
-            let next_line = lines[*i].trim();
+        for next_raw in &mut *commands_iter {
+            let next_line = next_raw.trim();
             try_reserve_string(&mut buffer, next_line.len(), "extended command buffer")?;
             buffer.push_str(next_line);
 
             if next_line.ends_with('%') {
                 break;
             }
-            *i += 1;
         }
 
         buffer
@@ -1269,9 +1385,7 @@ fn parse_command(
         // Block Aperture: %ABD##*% ... %AB*%
         parse_aperture_block(
             &line,
-            i,
-            length,
-            lines,
+            commands_iter,
             state,
             apertures,
             macros,
@@ -1350,9 +1464,7 @@ fn is_aperture_block_close(line: &str) -> bool {
 
 fn parse_aperture_block(
     line: &str,
-    i: &mut usize,
-    length: usize,
-    lines: &[&str],
+    commands_iter: &mut dyn Iterator<Item = &str>,
     state: &mut ParserState,
     apertures: &mut HashMap<String, Aperture>,
     macros: &mut HashMap<String, ApertureMacro>,
@@ -1380,9 +1492,8 @@ fn parse_aperture_block(
     let mut block_layers: Vec<PolarityLayer> = Vec::new();
     let mut block_region_contours: Vec<RegionContour> = Vec::new();
 
-    while *i + 1 < length {
-        *i += 1;
-        let block_line = lines[*i].trim();
+    while let Some(raw_block_line) = commands_iter.next() {
+        let block_line = raw_block_line.trim();
 
         if block_line.is_empty() || block_line.starts_with("G04") {
             continue;
@@ -1396,9 +1507,7 @@ fn parse_aperture_block(
             let nested_block_state = parse_aperture_block_code(block_line).map(|_| state.clone());
             parse_command(
                 block_line,
-                i,
-                length,
-                lines,
+                commands_iter,
                 state,
                 apertures,
                 macros,
@@ -1470,16 +1579,34 @@ pub fn parse_gerber_with_options(
     parser.parse(data)
 }
 
+#[cfg(test)]
 pub fn parse_gerber_payload_with_options(
     data: &str,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
 ) -> Result<ParsedGerberLayer, JsValue> {
-    let mut parser = GerberParser::with_options_and_interactions(
+    parse_gerber_payload_with_progress(
+        data,
         preserve_arc_regions,
         arc_tessellation_quality,
         true,
+        None,
+    )
+}
+
+pub fn parse_gerber_payload_with_progress(
+    data: &str,
+    preserve_arc_regions: bool,
+    arc_tessellation_quality: u32,
+    collect_interactions: bool,
+    progress: Option<ParseProgress>,
+) -> Result<ParsedGerberLayer, JsValue> {
+    let mut parser = GerberParser::with_options_and_interactions(
+        preserve_arc_regions,
+        arc_tessellation_quality,
+        collect_interactions,
     );
+    parser.progress = progress;
     parser.parse_payload(data)
 }
 

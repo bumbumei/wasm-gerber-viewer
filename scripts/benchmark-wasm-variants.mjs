@@ -14,8 +14,8 @@
 // Environment:
 //   WASM_BENCHMARK_ROUNDS    viewer loads per configuration (default 5)
 //   WASM_BENCHMARK_CONFIGURATIONS  subset to load, e.g. "wasm32,mixed"
-//   WASM_BENCHMARK_UPSTREAM_DIR  checkout of another version (with wasm/pkg
-//                            built) to measure as the "upstream" setup
+//   WASM_BENCHMARK_BASELINE_DIR  checkout of another version (with wasm/pkg
+//                            built), such as main, to measure as "baseline"
 //   WASM_BENCHMARK_SCALE     multiplies the generated layer sizes (default 1)
 //   WASM_BENCHMARK_PORT      static server port (default 4186)
 //   WASM_BENCHMARK_CHANNEL   Playwright browser channel (default bundled Chromium)
@@ -35,14 +35,14 @@ const scale = Number(process.env.WASM_BENCHMARK_SCALE ?? 1);
 const channel = process.env.WASM_BENCHMARK_CHANNEL;
 const allowSoftware = process.env.WASM_BENCHMARK_ALLOW_SOFTWARE === "1";
 const baseUrl = `http://127.0.0.1:${port}`;
-const upstreamDir = process.env.WASM_BENCHMARK_UPSTREAM_DIR;
-const upstreamUrl = `http://127.0.0.1:${port + 1}`;
+const baselineDir = process.env.WASM_BENCHMARK_BASELINE_DIR;
+const baselineUrl = `http://127.0.0.1:${port + 1}`;
 const selectedConfigurations = (process.env.WASM_BENCHMARK_CONFIGURATIONS ?? "")
   .split(",")
   .filter(Boolean);
-// An upstream checkout has a single wasm32 build and no ?wasm= parameter.
+// A baseline checkout may have a single wasm32 build and no ?wasm= parameter.
 const CONFIGURATIONS = [
-  ...(upstreamDir ? [{ name: "upstream", base: upstreamUrl, query: "", upstream: true }] : []),
+  ...(baselineDir ? [{ name: "baseline", base: baselineUrl, query: "", baseline: true }] : []),
   { name: "wasm32", base: baseUrl, query: "?wasm=32" },
   { name: "wasm64", base: baseUrl, query: "?wasm=64" },
   { name: "mixed", base: baseUrl, query: "" },
@@ -50,7 +50,7 @@ const CONFIGURATIONS = [
   ({ name }) => selectedConfigurations.length === 0 || selectedConfigurations.includes(name),
 );
 const BUILDS = [
-  ...(upstreamDir ? [{ name: "upstream", base: upstreamUrl, dir: "pkg" }] : []),
+  ...(baselineDir ? [{ name: "baseline", base: baselineUrl, dir: "pkg" }] : []),
   { name: "wasm32", base: baseUrl, dir: "pkg" },
   { name: "wasm64", base: baseUrl, dir: "pkg64" },
 ];
@@ -183,7 +183,8 @@ function installViewerProbes() {
       };
       this.addEventListener("message", (event) => {
         const start = started.get(event.data?.id);
-        if (!start) return;
+        // Progress reports arrive before the task's result.
+        if (!start || event.data.progress) return;
         bench.tasks.push({
           ms: performance.now() - start.at,
           variant: start.variant,
@@ -227,11 +228,11 @@ async function measureViewerLoad(browser, configuration, workload) {
   });
   await page.addInitScript(installViewerProbes);
   await page.goto(`${configuration.base}/${configuration.query}`, { waitUntil: "networkidle" });
-  await page.waitForFunction((upstream) =>
-    upstream
+  await page.waitForFunction((baseline) =>
+    baseline
       ? performance.getEntriesByType("resource").some((entry) => entry.name.endsWith("_bg.wasm"))
       : document.documentElement.dataset.wasmMain,
-  Boolean(configuration.upstream));
+  Boolean(configuration.baseline));
 
   // Time the main-instance calls that receive parsed layers or parse on the
   // main thread, and keep the last draw call to replay. The page-side import
@@ -442,9 +443,9 @@ const server = spawn(process.execPath, ["scripts/static-server.mjs"], {
   stdio: ["ignore", "ignore", "inherit"],
 });
 // The same static server, rooted at the other checkout.
-const upstreamServer = upstreamDir
+const baselineServer = baselineDir
   ? spawn(process.execPath, [join(process.cwd(), "scripts/static-server.mjs")], {
-      cwd: upstreamDir,
+      cwd: baselineDir,
       env: { ...process.env, GERBER_VIEWER_TEST_PORT: String(port + 1) },
       stdio: ["ignore", "ignore", "inherit"],
     })
@@ -453,7 +454,7 @@ const upstreamServer = upstreamDir
 let browser;
 try {
   await waitForServer(`${baseUrl}/index.html`);
-  if (upstreamServer) await waitForServer(`${upstreamUrl}/index.html`);
+  if (baselineServer) await waitForServer(`${baselineUrl}/index.html`);
   browser = await chromium.launch({
     ...(channel ? { channel } : {}),
     args: [
@@ -537,6 +538,6 @@ try {
 } finally {
   await browser?.close();
   server.kill();
-  upstreamServer?.kill();
+  baselineServer?.kill();
   rmSync(dataDir, { recursive: true, force: true });
 }

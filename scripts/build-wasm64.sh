@@ -194,7 +194,9 @@ echo "Using $("$wasm_bindgen" --version) at $wasm_bindgen"
 
 (
   cd "$REPO_ROOT/wasm"
-  cargo build --release --lib --target "$WASM64_TARGET" -Zbuild-std=std,panic_abort
+  # The parser's SIMD paths, as in the wasm32 build (scripts/vercel-build.sh).
+  RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+simd128" \
+    cargo build --release --lib --target "$WASM64_TARGET" -Zbuild-std=std,panic_abort
 )
 
 stage_dir="$(mktemp -d)"

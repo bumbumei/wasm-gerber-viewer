@@ -3601,8 +3601,15 @@ test(
 
 test(
   "bounded composite lifecycle stress balances every WebGL resource across recovery",
-  { skip: !canRender && "release WASM and node-gles-webgl2 are required" },
-  async () => {
+  {
+    // CI runs this test in a separate warning-only step while investigating stale readback.
+    // Local runs remain required. Remove the quarantine after the driver fix is verified.
+    // https://github.com/dsafdsaf132/wasm-gerber-viewer/issues/110
+    skip: process.env.SKIP_COMPOSITE_LIFECYCLE_STRESS === "1"
+      ? "runs in the separate CI warning-only step (issue #110)"
+      : !canRender && "release WASM and node-gles-webgl2 are required",
+  },
+  async (t) => {
     const wasm = await import(wasmModuleUrl.href);
     wasm.initSync({ module: readFileSync(wasmBinaryUrl) });
     const { createWebGLRenderingContext } = require("node-gles-webgl2");
@@ -3614,6 +3621,12 @@ test(
       webGLCompatibility: true,
     });
     const oldRawGl = createContext();
+    t.diagnostic(JSON.stringify({
+      vendor: oldRawGl.getParameter(oldRawGl.VENDOR),
+      renderer: oldRawGl.getParameter(oldRawGl.RENDERER),
+      version: oldRawGl.getParameter(oldRawGl.VERSION),
+      lpNumThreads: process.env.LP_NUM_THREADS ?? "default",
+    }));
     const replacementRawGl = createContext();
     const oldResources = resourceLifecycleProxy(oldRawGl);
     const replacementResources = resourceLifecycleProxy(replacementRawGl);
