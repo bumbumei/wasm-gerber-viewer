@@ -19,6 +19,22 @@
 
 업스트림 리뷰로 PR이 바뀌면 이 브랜치에도 다시 반영합니다.
 
+## 데모
+
+업스트림 README의 데모를 이 포크 배포본에서 엽니다. memory64를 지원하는 브라우저에서는 메인
+인스턴스가 memory64로 동작하고, 큰 파일은 로딩 창에서 파싱 진행률을 볼 수 있습니다.
+
+- 실제 보드
+  - [KLP-5e ESP32 센서 보드](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fraw.githubusercontent.com%2Ffutureshocked%2FKLP-5e-ESP32-sensor-board%2Fmain%2FKiCad%2520project%2Fdfm%2Fgerber.zip)
+  - [Xassette-Asterisk](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fprocessor-cdn.kitspace.org%2Fv6%2FSdtElectronics%2FXassette-Asterisk%2F6ccd88501c99e2339571de744d003d571be47fad%2F_%2FXassette-Asterisk-6ccd885-gerbers.zip)
+  - [OtterCastAmp](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fprocessor-cdn.kitspace.org%2Fv6%2FOttercast%2FOtterCastAmp%2F0b5f7f9a8e4e43a5d39048b9a1fa03e5cf7fc9f7%2F_%2FOtterCastAmp-0b5f7f9-gerbers.zip)
+  - [Zaius EVT3 메인보드 (ODB++)](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fmedia.githubusercontent.com%2Fmedia%2Fopencomputeproject%2Fzaius-barreleye-g2%2Fmaster%2FHW%2FEE%2FGBR%2FEVT%2FMB%2FZaius-EVT3-LAYOUT-MB-ODB-X02-20161226-Final.zip)
+- [기능 테스트](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fbumbumei.github.io%2Fwasm-gerber-viewer%2Fdemo%2Fgerber-feature-test.gbr)
+- 성능 테스트 - 별 모양: [1K](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fbumbumei.github.io%2Fwasm-gerber-viewer%2Fdemo%2Fperformance-test-stars-1K.gbr), [10K](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fbumbumei.github.io%2Fwasm-gerber-viewer%2Fdemo%2Fperformance-test-stars-10K.gbr), [100K](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-100K.gbr), [1M](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr), [5M](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=5&repeatOffsetX=70), [10M](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=10&repeatOffsetX=70), [20M](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=20&repeatOffsetX=70), [50M](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=50&repeatOffsetX=0.007)
+- 성능 테스트 - 단일 region: [72K](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fbumbumei.github.io%2Fwasm-gerber-viewer%2Fdemo%2Fperformance-test-region-72K.gbr), [648K](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-region-648K.gbr), [1.8M](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-region-1.8M.gbr)
+- 성능 테스트 - arc region: [1.3M](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-arc-region-1.3M.gbr)
+- memory64: [패드 2,400만 개 (4 GiB 초과)](https://bumbumei.github.io/wasm-gerber-viewer/?url=https%3A%2F%2Fbumbumei.github.io%2Fwasm-gerber-viewer%2Fdemo%2Fmemory64-test-pads-24M.gbr) (아래 절 참고)
+
 ## 지원 브라우저
 
 | 브라우저 | 동작 방식 | 메인 인스턴스 메모리 한도 |
@@ -134,6 +150,7 @@ To use the viewer, go to the upstream project:
 [repository](https://github.com/dsafdsaf132/wasm-gerber-viewer).
 It currently runs upstream `d6891bd` plus the two pull requests under review upstream
 (memory64 main instance, parse progress for large layers).
+The demo list above opens upstream's demos in this fork's deployment.
 The memory64 sample above needs Chrome or Edge 133+, or Firefox 134+.
 Supported browsers: Chrome and Edge 133+ and Firefox 134+ (desktop and Android) run the
 memory64 main instance (up to about 15.5 GiB); older Chrome, Edge and Firefox with WebGL2
