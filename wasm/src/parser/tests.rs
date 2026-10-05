@@ -15,6 +15,51 @@ fn assert_approx_eq(actual: f32, expected: f32) {
     );
 }
 
+#[test]
+fn movement_and_comment_commands_do_not_reserve_primitive_storage() {
+    let mut source = String::from("%FSLAX84Y84*%\n%MOMM*%\n");
+    for _ in 0..100_000 {
+        source.push_str("G04 move only*\nX000000010000Y000000020000D02*\n");
+    }
+    source.push_str("M02*");
+    let mut parser = GerberParser::with_options(true, 1);
+    assert!(parser.parse(&source).unwrap().is_empty());
+    assert_eq!(parser.current_primitives.capacity(), 0);
+    assert!(parser.polarity_layers.is_empty());
+}
+
+#[test]
+fn large_gerber_preserves_simd_coordinate_values_and_modal_axes() {
+    use std::fmt::Write;
+    const COUNT: usize = 20_000;
+    let mut source = String::with_capacity(COUNT * 40);
+    source.push_str("%FSLAX84Y84*%\n%MOMM*%\n%ADD10C,0.01*%\nD10*\n");
+    for index in 0..COUNT {
+        let x = (index as i64 * 7919) % 100_000_000;
+        let y = (index as i64 * 104729) % 100_000_000;
+        if index % 2 == 0 {
+            writeln!(source, "X+{x:012}Y-{y:012}D03*").unwrap();
+        } else {
+            // Omitted Y retains the preceding coordinate.
+            writeln!(source, "X-{x:012}D03*").unwrap();
+        }
+    }
+    source.push_str("M02*");
+    let layers = parse_gerber(&source).unwrap();
+    assert_eq!(layers.len(), 1);
+    let circles = &layers[0].circles;
+    assert_eq!(circles.x.len(), COUNT);
+    for index in 0..COUNT {
+        let x = ((index as i64 * 7919) % 100_000_000) as f32 / 10000.0;
+        let y_index = index - index % 2;
+        let y = -(((y_index as i64 * 104729) % 100_000_000) as f32) / 10000.0;
+        let x = if index % 2 == 0 { x } else { -x };
+        // Geometry transforms may normalize signed zero; compare values here.
+        assert_eq!(circles.x[index], x, "X at {index}");
+        assert_eq!(circles.y[index], y, "Y at {index}");
+    }
+}
+
 fn triangle_bounds(vertices: &[f32]) -> (f32, f32, f32, f32) {
     let mut min_x = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
@@ -1427,6 +1472,40 @@ fn arc_regions_still_split_on_polarity_changes_and_primitives() {
         .map(|layer| layer.path_regions.region_count())
         .collect();
     assert_eq!(region_counts, vec![1, 0, 1]);
+}
+
+#[test]
+fn arc_region_caps_use_shared_endpoint_rays_without_extra_vertex_attributes() {
+    let layers = parse_gerber(
+        "%FSLAX26Y26*%\n%MOMM*%\nG75*\nG36*\nX1000000Y0D02*\nG03X0Y1000000I-1000000J0D01*\nG01X1000000Y0D01*\nG37*\nM02*",
+    )
+    .expect("quarter-circle region should parse");
+    let sector = &layers[0].path_regions.sector_vertices;
+    assert_eq!(sector.len(), 6 * PATH_SECTOR_VERTEX_FLOATS);
+    let start = &sector[..5];
+    let end = &sector[5..10];
+    let outer_end = &sector[10..15];
+    let outer_start = &sector[25..30];
+    assert_approx_eq(start[0], 1.0);
+    assert_approx_eq(end[1], 1.0);
+    assert_approx_eq(outer_start[1], 0.0);
+    assert_approx_eq(outer_end[0], 0.0);
+    assert!(outer_start[0] > std::f32::consts::SQRT_2);
+    assert!(outer_end[1] > std::f32::consts::SQRT_2);
+}
+
+#[test]
+fn clamped_arc_region_caps_preserve_non_degenerate_legacy_coverage() {
+    let layers = parse_gerber(
+        "%FSLAX24Y24*%\n%MOMM*%\nG36*\nX010000Y000000D02*\nG03*\nX-010000Y000000I-010000J000000D01*\nX010000Y000000I010000J000000D01*\nG37*\nM02*",
+    )
+    .expect("legacy clamped region should still parse");
+    for cap in layers[0].path_regions.sector_vertices.chunks_exact(30) {
+        let outer_end = &cap[10..15];
+        let outer_start = &cap[25..30];
+        assert!(outer_start[1].abs() > 0.2);
+        assert!(outer_end[1].abs() > 0.2);
+    }
 }
 
 #[test]
@@ -3047,4 +3126,140 @@ D10*X000000Y000000D03*X010000Y000000D03*M02*";
     let layers = parse_gerber(data).expect("malformed empty extended commands are ignored");
     assert_eq!(layers.len(), 1);
     assert_eq!(layers[0].circles.x.len(), 2);
+}
+
+type ProgressReports = std::rc::Rc<std::cell::RefCell<Vec<(super::ParseStage, usize, usize)>>>;
+
+fn parse_with_progress(data: &str) -> (Vec<GerberData>, Vec<(super::ParseStage, usize, usize)>) {
+    let reports = ProgressReports::default();
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let sink = reports.clone();
+    parser.progress = Some(Box::new(move |stage, done, total| {
+        sink.borrow_mut().push((stage, done, total));
+    }));
+    let layers = parser
+        .parse(data)
+        .expect("progress test layer should parse");
+    let reports = reports.borrow().clone();
+    (layers, reports)
+}
+
+fn stage_reports(
+    reports: &[(super::ParseStage, usize, usize)],
+    stage: super::ParseStage,
+) -> Vec<(usize, usize)> {
+    reports
+        .iter()
+        .filter(|(reported, _, _)| *reported == stage)
+        .map(|&(_, done, total)| (done, total))
+        .collect()
+}
+
+#[test]
+fn progress_counts_commands_then_shapes_and_ends_complete() {
+    let flashes = 200_000;
+    let mut data = String::from("%FSLAX24Y24*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\n");
+    for index in 0..flashes {
+        data.push_str(&format!(
+            "X{}Y{}D03*\n",
+            index % 1000 * 100,
+            index / 1000 * 100
+        ));
+    }
+    data.push_str("M02*");
+
+    let (layers, reports) = parse_with_progress(&data);
+    assert_eq!(layers[0].circles.x.len(), flashes);
+
+    let commands = stage_reports(&reports, super::ParseStage::Commands);
+    let total = data.len();
+    assert_eq!(commands.first(), Some(&(0, total)));
+    assert_eq!(commands.last(), Some(&(total, total)));
+    assert!(
+        commands.len() >= 4,
+        "{} bytes should report at least every {} bytes: {commands:?}",
+        total,
+        super::PROGRESS_BYTE_STEP
+    );
+    assert!(commands.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+
+    let geometry = stage_reports(&reports, super::ParseStage::Geometry);
+    assert_eq!(geometry.first(), Some(&(0, flashes)));
+    assert_eq!(geometry.last(), Some(&(flashes, flashes)));
+    let first_geometry = reports
+        .iter()
+        .position(|(stage, _, _)| *stage == super::ParseStage::Geometry)
+        .unwrap();
+    assert!(
+        reports[first_geometry..]
+            .iter()
+            .all(|(stage, _, _)| *stage == super::ParseStage::Geometry),
+        "geometry follows the commands"
+    );
+}
+
+#[test]
+fn step_repeat_flashes_report_progress_within_few_commands() {
+    // 100 flashes stepped 100 x 100 times: a million shapes from a file of
+    // about a kilobyte, far less than the byte step.
+    let mut data =
+        String::from("%FSLAX24Y24*%\n%MOMM*%\n%ADD10C,0.01*%\n%SRX100Y100I1.0J1.0*%\nD10*\n");
+    for index in 0..100 {
+        data.push_str(&format!("X{}Y0D03*\n", index * 50));
+    }
+    data.push_str("%SR*%\nM02*");
+
+    let (layers, reports) = parse_with_progress(&data);
+    let shapes: usize = layers.iter().map(|layer| layer.circles.x.len()).sum();
+    assert_eq!(shapes, 1_000_000);
+
+    let commands = stage_reports(&reports, super::ParseStage::Commands);
+    let total = commands[0].1;
+    assert!(total < super::PROGRESS_BYTE_STEP);
+    let intermediate = commands
+        .iter()
+        .filter(|&&(done, _)| done > 0 && done < total)
+        .count();
+    assert!(
+        intermediate >= 3,
+        "one report per {} shapes expected: {commands:?}",
+        super::PROGRESS_SHAPE_STEP
+    );
+
+    let geometry = stage_reports(&reports, super::ParseStage::Geometry);
+    assert!(
+        geometry.len() >= 5,
+        "a million shapes should report while they become buffers: {geometry:?}"
+    );
+    assert_eq!(geometry.last(), Some(&(shapes, shapes)));
+}
+
+#[test]
+fn a_parse_without_a_progress_callback_matches_one_with_it() {
+    let data = "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,0.5*%
+%LPD*%
+D10*
+X000000Y000000D03*
+%LPC*%
+X000000Y000000D03*
+%LPD*%
+X010000Y000000D03*
+M02*";
+    let (with_progress, reports) = parse_with_progress(data);
+    let without_progress = parse_gerber_payload_with_options(data, true, 1)
+        .expect("layer should parse")
+        .render_layers;
+
+    assert_eq!(with_progress.len(), without_progress.len());
+    for (left, right) in with_progress.iter().zip(&without_progress) {
+        assert_eq!(left.circles.x, right.circles.x);
+        assert_eq!(left.is_negative, right.is_negative);
+    }
+    assert_eq!(
+        stage_reports(&reports, super::ParseStage::Geometry).last(),
+        Some(&(3, 3))
+    );
 }

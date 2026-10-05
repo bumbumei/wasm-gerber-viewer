@@ -4,7 +4,7 @@ use crate::interaction::{
     aperture_name, aperture_type, feature_from_primitive_delta, FeatureKind, FeatureProperties,
     InteractionFeature, InteractionLayer, PathRegionRef,
 };
-use crate::parser::common::{parse_coordinate_number, parse_g_code, read_word_value};
+use crate::parser::common::{extract_command_tokens, parse_coordinate_number, parse_g_code};
 use crate::parser::{Aperture, FormatSpec, ParserState, Polarity, PolarityLayer};
 use crate::util::{format_bytes, format_count};
 use i_overlay::core::fill_rule::FillRule;
@@ -1072,14 +1072,7 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
     }
 }
 
-/// Extracts the numeric value after a specific character in a string (e.g., "X1000" → "1000")
-pub fn extract_value(line: &str, key: char) -> Option<String> {
-    read_word_value(line, key, false).map(ToString::to_string)
-}
-
-fn extract_coordinate_value(line: &str, key: char) -> Option<String> {
-    read_word_value(line, key, true).map(ToString::to_string)
-}
+// (Replaced by extract_command_tokens in common.rs)
 
 /// Coordinate value conversion - decimal point processing according to format spec
 pub fn convert_coordinate(
@@ -2617,18 +2610,30 @@ fn push_sector_cap_quad(
     start: [f32; 2],
     end: [f32; 2],
 ) -> Result<(), String> {
-    let mid_angle = start_angle + sweep_angle * 0.5;
-    let outward = [mid_angle.cos(), mid_angle.sin()];
-    let sagitta = radius * (1.0 - (sweep_angle.abs() * 0.5).cos());
-    let cover_distance = sagitta + (radius.abs() * 1.0e-4).max(1.0e-5);
-    let start_outer = [
-        start[0] + outward[0] * cover_distance,
-        start[1] + outward[1] * cover_distance,
+    // Put the outer edge beyond the tangent at the arc midpoint, with the
+    // sides on the endpoint rays. Adjacent caps then share a side rather
+    // than overlap when the shader expands their outer edge for AA.
+    let margin = (radius.abs() * 1.0e-4).max(1.0e-5);
+    let outer_scale = 1.0 / (sweep_angle.abs() * 0.5).cos() + margin / radius.max(1.0e-9);
+    let mut start_outer = [
+        center[0] + (start[0] - center[0]) * outer_scale,
+        center[1] + (start[1] - center[1]) * outer_scale,
     ];
-    let end_outer = [
-        end[0] + outward[0] * cover_distance,
-        end[1] + outward[1] * cover_distance,
+    let mut end_outer = [
+        center[0] + (end[0] - center[0]) * outer_scale,
+        center[1] + (end[1] - center[1]) * outer_scale,
     ];
+    let expected_end = angle_point(center, radius, start_angle + sweep_angle);
+    if (expected_end[0] - end[0]).hypot(expected_end[1] - end[1]) > margin {
+        // Keep the existing point-sampled interpretation of inconsistent
+        // single-quadrant commands whose raw endpoint lies beyond the
+        // clamped sweep. Endpoint rays can be collinear in that case.
+        let mid_angle = start_angle + sweep_angle * 0.5;
+        let distance = radius * (1.0 - (sweep_angle.abs() * 0.5).cos()) + margin;
+        let outward = [mid_angle.cos() * distance, mid_angle.sin() * distance];
+        start_outer = [start[0] + outward[0], start[1] + outward[1]];
+        end_outer = [end[0] + outward[0], end[1] + outward[1]];
+    }
 
     try_reserve_values(
         vertices,
@@ -3341,12 +3346,8 @@ pub fn parse_graphic_command(
         }
     }
 
-    // Extract coordinates and D-code using regex
-    let x_match = extract_coordinate_value(clean_line, 'X');
-    let y_match = extract_coordinate_value(clean_line, 'Y');
-    let i_match = extract_coordinate_value(clean_line, 'I');
-    let j_match = extract_coordinate_value(clean_line, 'J');
-    let d_match = extract_value(clean_line, 'D');
+    // Extract coordinates and D-code using zero-allocation token extractor
+    let tokens = extract_command_tokens(clean_line);
 
     let mut x = state.x;
     let mut y = state.y;
@@ -3354,7 +3355,7 @@ pub fn parse_graphic_command(
     let mut j = 0.0;
 
     // Process X coordinate
-    if let Some(x_val) = x_match.as_ref() {
+    if let Some(x_val) = tokens.x {
         let new_x =
             convert_coordinate(x_val, 'x', &state.format_spec, state.unit_multiplier) * state.scale;
         x = if state.coordinate_mode == "absolute" {
@@ -3365,7 +3366,7 @@ pub fn parse_graphic_command(
     }
 
     // Process Y coordinate
-    if let Some(y_val) = y_match.as_ref() {
+    if let Some(y_val) = tokens.y {
         let new_y =
             convert_coordinate(y_val, 'y', &state.format_spec, state.unit_multiplier) * state.scale;
         y = if state.coordinate_mode == "absolute" {
@@ -3376,7 +3377,7 @@ pub fn parse_graphic_command(
     }
 
     // Process I coordinate (arc center X offset)
-    if let Some(i_val) = i_match.as_ref() {
+    if let Some(i_val) = tokens.i {
         let raw_i =
             convert_coordinate(i_val, 'x', &state.format_spec, state.unit_multiplier) * state.scale;
         i = if state.quadrant_mode == "single" {
@@ -3387,7 +3388,7 @@ pub fn parse_graphic_command(
     }
 
     // Process J coordinate (arc center Y offset)
-    if let Some(j_val) = j_match.as_ref() {
+    if let Some(j_val) = tokens.j {
         let raw_j =
             convert_coordinate(j_val, 'y', &state.format_spec, state.unit_multiplier) * state.scale;
         j = if state.quadrant_mode == "single" {
@@ -3398,7 +3399,7 @@ pub fn parse_graphic_command(
     }
 
     // Process D-code
-    if let Some(d_val) = d_match {
+    if let Some(d_val) = tokens.d {
         if let Ok(d_code) = d_val.parse::<u32>() {
             match d_code {
                 1 => {
@@ -3508,7 +3509,7 @@ pub fn parse_graphic_command(
                 _ => {}
             }
         }
-    } else if (x_match.is_some() || y_match.is_some()) && state.pen_state == "down" {
+    } else if (tokens.x.is_some() || tokens.y.is_some()) && state.pen_state == "down" {
         // If there is only X/Y without D-code and the pen is down, execute interpolation
         if state.region_mode {
             if let Some(last_contour) = region_contours.last_mut() {
