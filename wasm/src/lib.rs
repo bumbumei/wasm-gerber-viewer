@@ -207,8 +207,9 @@ pub fn parse_gerber_layer_payload_with_options(
 
 /// `parse_gerber_layer_payload_with_options` that calls
 /// `on_progress(stage, done, total)` while it works: `"commands"` counts the
-/// bytes of the file read, `"geometry"` the parsed shapes as they become render
-/// buffers, and `"packing"` (0 of 1) starts the copy of the result into JS.
+/// bytes of the file read, `"geometry"` the parsed shapes that have become
+/// render buffers, a polarity layer at a time, and `"packing"` (0 of 1) starts
+/// the copy of the result into JS.
 /// What the callback throws is ignored. Without `collect_interactions` the
 /// result has no picking data (`interactionPayload` is null).
 #[wasm_bindgen]

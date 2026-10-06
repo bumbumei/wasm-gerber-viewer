@@ -47,7 +47,8 @@ pub struct ParsedGerberLayer {
 pub enum ParseStage {
     /// Running the file's commands; the counts are bytes of the file read.
     Commands,
-    /// Building render buffers from the parsed shapes; the counts are shapes.
+    /// Building render buffers from the parsed shapes; the counts are shapes,
+    /// reported between polarity layers.
     Geometry,
 }
 
@@ -1229,6 +1230,7 @@ impl GerberParser {
             .map(|layer| layer.primitives.len())
             .sum();
         let mut done_shapes = 0;
+        let mut reported_shapes = 0;
         report_progress(&mut self.progress, ParseStage::Geometry, 0, total_shapes);
         for layer in polarity_layers {
             let render_sublayer_idx = gerber_data_layers.len();
@@ -1237,25 +1239,25 @@ impl GerberParser {
                 layer.primitives,
                 layer.path_regions,
                 layer.polarity == Polarity::Negative,
-                &mut |done| {
-                    report_progress(
-                        &mut self.progress,
-                        ParseStage::Geometry,
-                        done_shapes + done,
-                        total_shapes,
-                    )
-                },
             )?;
+            // Between polarity layers, because counting inside the loop that
+            // moves the shapes would slow it down, and only after a step of
+            // shapes or the last of them: a file can have thousands of layers.
             done_shapes += layer_shapes;
+            if done_shapes - reported_shapes >= PROGRESS_SHAPE_STEP
+                || (done_shapes == total_shapes && reported_shapes < total_shapes)
+            {
+                report_progress(
+                    &mut self.progress,
+                    ParseStage::Geometry,
+                    done_shapes,
+                    total_shapes,
+                );
+                reported_shapes = done_shapes;
+            }
             sublayer_map.push(render_sublayer_idx);
             gerber_data_layers.append(&mut gerber_data);
         }
-        report_progress(
-            &mut self.progress,
-            ParseStage::Geometry,
-            total_shapes,
-            total_shapes,
-        );
         if let Some(interaction_layer) = &mut self.interaction_layer {
             interaction_layer.remap_path_region_sublayers(&sublayer_map)?;
         }
@@ -1271,22 +1273,17 @@ impl GerberParser {
         })
     }
 
-    /// Convert a vector of primitives to GerberData, telling `on_progress` how
-    /// many of them are done every `PROGRESS_SHAPE_STEP` primitives.
+    /// Convert a vector of primitives to GerberData
     fn primitives_to_gerber_data(
         primitives: Vec<Primitive>,
         path_regions: PathRegions,
         is_negative: bool,
-        on_progress: &mut dyn FnMut(usize),
     ) -> Result<Vec<GerberData>, JsValue> {
         let counts = SplitPrimitiveBufferCounts::from_primitives(&primitives);
         let mut plain_buffers = PrimitiveOutputBuffers::reserved_for(&counts.plain)?;
         let mut holed_buffers = PrimitiveOutputBuffers::reserved_for(&counts.holed)?;
 
-        for (index, primitive) in primitives.into_iter().enumerate() {
-            if index % PROGRESS_SHAPE_STEP == 0 && index > 0 {
-                on_progress(index);
-            }
+        for primitive in primitives {
             if primitive_has_hole(&primitive) {
                 holed_buffers.push_primitive(primitive)?;
             } else {

@@ -89,19 +89,23 @@ const RECYCLE_PARSE_WORKER_MEMORY_BYTES = 256 * BYTES_PER_MIB;
 const RECYCLE_PARSE_WORKER_GROWTH_BYTES = 128 * BYTES_PER_MIB;
 // Long enough to read the list of browsers; the notice can also be closed.
 const MEMORY_LIMIT_NOTICE_DURATION_MS = 20_000;
-// Share of a worker parse each stage it reports covers. On a laptop, layers
-// of 3 million flashes, 6 million step-and-repeat pads and 72,000 regions all
-// spent 85-90% of the parse running commands, about 5% building render
-// buffers and 5-10% copying the result out.
+// Share of a worker parse each stage it reports covers. Measured on a laptop:
+// a 57 MiB layer of 3 million flashes spends about 87% of its parse running
+// commands, 5% building render buffers and 7% copying the result out, while
+// step-and-repeat layers of 6 and 24 million pads spend about 35-40%, 20%
+// and 40-45%. The spans sit between the two, so the bar runs behind on the
+// first kind and stands still for longer on the second: only the commands
+// stage reports while it runs. Render buffers report between polarity
+// layers, and the copy is one call.
 const PARSE_STAGE_SPANS = {
-  commands: [0, 0.85],
-  geometry: [0.85, 0.9],
-  packing: [0.9, 1],
+  commands: [0, 0.6],
+  geometry: [0.6, 0.75],
+  packing: [0.75, 1],
 };
-// Share of loading one layer that is its parse; adding it to the renderer
-// took the remaining 3-6% on those layers. Building the picking index
-// afterwards is counted on its own.
-const LAYER_PARSE_SHARE = 0.95;
+// Share of loading one layer that is its parse. Adding the layer to the
+// renderer took another 3% to 25% of the parse time on those layers. Building
+// the picking index afterwards is counted on its own.
+const LAYER_PARSE_SHARE = 0.9;
 // Render data from which adding a layer takes long enough to show its stage.
 const SLOW_LAYER_ADD_BYTES = 32 * BYTES_PER_MIB;
 const ARC_TESSELLATION_QUALITY_LEVELS = {
@@ -488,8 +492,8 @@ function clampProgress(value) {
 }
 
 /**
- * How much of a layer's parse a worker progress report stands for. Each stage
- * covers the share of the parse it took on large layers.
+ * How much of a layer's parse a worker progress report stands for, from the
+ * stage's span and how far the stage has got.
  */
 function getParseProgressFraction({ stage, done, total } = {}) {
   const span = PARSE_STAGE_SPANS[stage];
@@ -3888,6 +3892,8 @@ export class GerberViewer {
   /**
    * `current` of `total` items are done; `partial` adds the part of the
    * items in progress that is done, in items (0.5 is half of one).
+   * `showPercent` also writes the bar's value as a percentage, for counts
+   * that move within an item.
    */
   updateLoadingModal({
     title = null,
@@ -3896,6 +3902,7 @@ export class GerberViewer {
     current = null,
     total = null,
     partial = 0,
+    showPercent = false,
     indeterminate = false,
   } = {}) {
     if (title !== null) {
@@ -3929,9 +3936,11 @@ export class GerberViewer {
         : 0;
     const percent = clampProgress(progressRatio) * 100;
     this.loadingProgressBar.value = Math.round(percent);
-    // Rounded down, so 100% means done.
-    this.loadingProgressValue.textContent = `${Math.floor(percent)}%`;
-    this.loadingProgressValue.hidden = false;
+    // Rounded down, so 100% means every layer is loaded.
+    this.loadingProgressValue.textContent = showPercent
+      ? `${Math.floor(percent)}%`
+      : "";
+    this.loadingProgressValue.hidden = !showPercent;
   }
 
   hideLoadingModal() {
@@ -4777,7 +4786,7 @@ export class GerberViewer {
   /**
    * Adding a large layer to the renderer blocks the page for a while; let the
    * browser show the "Rendering" stage first. Smaller layers are added in
-   * well under a tenth of a second and are not worth a frame of waiting.
+   * about a tenth of a second or less and are not worth a frame of waiting.
    */
   async waitForPaintBeforeAddingLayer(renderPayload) {
     if (getTypedArrayBytes(renderPayload) >= SLOW_LAYER_ADD_BYTES) {
@@ -4785,7 +4794,10 @@ export class GerberViewer {
     }
   }
 
-  /** Shows `fields` in the loading modal along with how far `progress` is. */
+  /**
+   * Shows `fields` in the loading modal along with how far `progress` is,
+   * as a count of layers and a percentage that includes layers under way.
+   */
   updateLayerLoadModal(progress, fields) {
     let partial = 0;
     for (const fraction of progress.partialLayers?.values() ?? []) {
@@ -4796,6 +4808,7 @@ export class GerberViewer {
       current: progress.completedLayers,
       total: progress.total,
       partial,
+      showPercent: true,
     });
   }
 
@@ -5123,20 +5136,18 @@ export class GerberViewer {
           interactionPayload = null;
         }
       }
-      this.updateLoadingModal({
+      this.markLayerLoadComplete(progress, index);
+      this.updateLayerLoadModal(progress, {
         stage: "Loaded",
         fileName: name,
-        current: index + 1,
-        total,
       });
       return true;
     } catch (error) {
       this.handleLayerLoadError(name, error);
-      this.updateLoadingModal({
+      this.markLayerLoadComplete(progress, index);
+      this.updateLayerLoadModal(progress, {
         stage: "Skipped",
         fileName: name,
-        current: index + 1,
-        total,
       });
       return false;
     }

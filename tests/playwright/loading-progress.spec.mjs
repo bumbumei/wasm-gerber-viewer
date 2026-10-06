@@ -31,13 +31,12 @@ function recordLoadingModal() {
   new MutationObserver(() => {
     const modal = document.getElementById("loading-modal");
     if (!modal || modal.hidden) return;
+    const value = document.getElementById("loading-progress-value");
     const snapshot = {
       stage: document.getElementById("loading-stage").textContent,
       fileName: document.getElementById("loading-file-name").textContent,
-      percent: Number.parseInt(
-        document.getElementById("loading-progress-value").textContent,
-        10,
-      ),
+      // null while the modal shows no percentage.
+      percent: value.hidden ? null : Number.parseInt(value.textContent, 10),
       bar: Number(document.getElementById("loading-progress-bar").value),
     };
     const last = snapshots.at(-1);
@@ -82,14 +81,21 @@ test("the loading modal shows how far a large layer's parse has got", async ({ p
     `parse progress between 5% and 90%: ${JSON.stringify(snapshots)}`,
   ).toBeGreaterThanOrEqual(3);
 
-  // Loading the layers only ever moves forward. Preparing counts the files
-  // checked before loading starts, and the picking index that is built
-  // afterwards counts on its own.
-  const loading = snapshots.filter(
-    ({ stage }) =>
-      stage !== "Preparing" &&
-      stage !== "Building picking index" &&
-      stage !== "Picking ready",
+  // The percentage belongs to loading the layers. Preparing counts the files
+  // checked before loading starts and the picking index that is built
+  // afterwards counts its own layers, so neither shows one.
+  const counted = snapshots.filter(({ stage }) =>
+    ["Preparing", "Building picking index", "Picking ready"].includes(stage),
+  );
+  expect(counted.map(({ stage }) => stage)).toContain("Building picking index");
+  for (const snapshot of counted) {
+    expect(snapshot.percent, JSON.stringify(snapshot)).toBeNull();
+  }
+
+  // Loading the layers only ever moves forward.
+  const loading = snapshots.filter(({ percent }) => percent !== null);
+  expect(loading.map(({ stage }) => stage)).toEqual(
+    expect.arrayContaining(["Parsing", "Rendering", "Loaded"]),
   );
   for (const [index, snapshot] of loading.entries()) {
     expect(snapshot.percent).toBe(Math.floor(snapshot.percent));
