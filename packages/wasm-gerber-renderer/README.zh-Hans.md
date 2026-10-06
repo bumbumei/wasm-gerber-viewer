@@ -17,7 +17,7 @@
 - 将 Gerber 文件、TAR 压缩包和 ODB++ `.zip`/`.tar`/`.tgz`/`.tar.gz` 作业渲染为 PNG 的 `gerber-renderer` CLI
 - 打包时生成并内置的 `wasm-bindgen` 输出
 
-内置模块是 wasm32 构建，因此一个渲染器最多可使用 4 GiB 的 WASM 内存。Web 查看器为主实例加载的 memory64 构建不包含在本包中。
+本包使用 wasm32，每个渲染器的 WASM 内存上限为 4 GiB。
 
 浏览器入口使用调用方提供的 WebGL2 canvas。Node.js 入口使用同一个 WASM/WebGL 渲染器，并默认通过 [`node-gles-webgl2`](https://github.com/dsafdsaf132/node-gles-webgl2) 创建原生 WebGL2 上下文。
 

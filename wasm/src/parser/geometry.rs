@@ -1585,6 +1585,58 @@ pub fn flash_aperture(
             return Ok(());
         }
 
+        // Keep the expanded representation and original copy order, but apply
+        // aperture transforms only once. Negative apertures retain their old
+        // world-space boolean path (translation can affect polygon rounding).
+        if repeat_count > 1 && !aperture.has_negative {
+            // The common single-circle case needs no scratch allocation.
+            let single = if let [primitive] = aperture.primitives.as_slice() {
+                let mut primitive = primitive.clone();
+                scale_primitive(&mut primitive, state.layer_scale);
+                mirror_primitive(&mut primitive, state.mirror_x, state.mirror_y);
+                rotate_primitive(&mut primitive, state.layer_rotation);
+                Some(primitive)
+            } else {
+                None
+            };
+            let mut scratch = Vec::new();
+            let transformed = if let Some(primitive) = single.as_ref() {
+                std::slice::from_ref(primitive)
+            } else {
+                flash_aperture_no_sr(
+                    aperture,
+                    &mut scratch,
+                    0.0,
+                    0.0,
+                    state.layer_scale,
+                    state.mirror_x,
+                    state.mirror_y,
+                    state.layer_rotation,
+                )?;
+                scratch.as_slice()
+            };
+            // A stored template can fail to transform, leaving multiple raw
+            // primitives per copy. Account for and reserve the representation
+            // actually emitted, not the presence of the original template.
+            let additional = consume_expansion(
+                state,
+                transformed.len().max(1),
+                repeat_count,
+                "aperture flash",
+            )?;
+            try_reserve_primitives(primitives, additional, "aperture flash")?;
+            for sy in 0..state.sr_y {
+                for sx in 0..state.sr_x {
+                    let flash_x = x + sx as f32 * state.sr_i;
+                    let flash_y = y + sy as f32 * state.sr_j;
+                    for primitive in transformed {
+                        primitives.push(offset_primitive_by(primitive, flash_x, flash_y));
+                    }
+                }
+            }
+            return Ok(());
+        }
+
         consume_expansion(
             state,
             aperture_flash_work_items(aperture)?,
@@ -2891,6 +2943,7 @@ pub(crate) fn record_flash_interactions(
     state: &ParserState,
     x: f32,
     y: f32,
+    rendered: &[Primitive],
 ) -> Result<(), String> {
     let Some(interaction_layer) = interaction_layer else {
         return Ok(());
@@ -2903,11 +2956,44 @@ pub(crate) fn record_flash_interactions(
         state.mirror_y,
         state.layer_rotation,
     );
+    // Metadata is constant for one flash command, including its SR copies.
+    // Intern it once; retain separate geometry/bounds for each copy.
+    let mut first_feature = None;
+    let mut record_copy = |copy: &[Primitive]| {
+        if let Some(first_feature) = first_feature {
+            interaction_layer.push_repeated_flash(first_feature, copy);
+            return;
+        }
+        if let Some(feature) = feature_from_primitive_delta(
+            FeatureKind::Flash,
+            aperture_code,
+            aperture,
+            state.polarity,
+            copy,
+            properties.clone(),
+        ) {
+            first_feature = Some(interaction_layer.features.len());
+            interaction_layer.push(feature);
+        }
+    };
+    // Plain apertures have a fixed number of primitives per copy. Reuse the
+    // render geometry rather than transforming it again for picking. Template
+    // and negative apertures keep their existing picking representation.
+    if !aperture.has_negative && aperture.triangle_template.is_none() {
+        let per_copy = aperture.primitives.len();
+        if per_copy != 0 {
+            for copy in rendered.chunks_exact(per_copy) {
+                record_copy(copy);
+            }
+        }
+        return Ok(());
+    }
+    let mut primitives = Vec::new();
     for sy in 0..state.sr_y {
         for sx in 0..state.sr_x {
             let flash_x = x + sx as f32 * state.sr_i;
             let flash_y = y + sy as f32 * state.sr_j;
-            let mut primitives = Vec::new();
+            primitives.clear();
             flash_aperture_no_sr(
                 aperture,
                 &mut primitives,
@@ -2919,16 +3005,7 @@ pub(crate) fn record_flash_interactions(
                 state.layer_rotation,
             )?;
 
-            if let Some(feature) = feature_from_primitive_delta(
-                FeatureKind::Flash,
-                aperture_code,
-                aperture,
-                state.polarity,
-                &primitives,
-                properties.clone(),
-            ) {
-                interaction_layer.push(feature);
-            }
+            record_copy(&primitives);
         }
     }
 
@@ -3468,6 +3545,7 @@ pub fn parse_graphic_command(
                         )?;
                     }
                     let block_sublayer_start = polarity_layers.len();
+                    let flash_primitive_start = primitives.len();
                     flash_aperture(
                         state,
                         apertures,
@@ -3498,6 +3576,7 @@ pub fn parse_graphic_command(
                                 state,
                                 x,
                                 y,
+                                &primitives[flash_primitive_start..],
                             )?;
                         }
                     }
