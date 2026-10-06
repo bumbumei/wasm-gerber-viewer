@@ -156,7 +156,7 @@ fn generated_geometry_budget_is_cumulative() {
     let state = ParserState::default();
 
     state
-        .consume_generated_items(MAX_GENERATED_ITEMS, "test")
+        .consume_generated_items(MAX_GENERATED_ITEMS as usize, "test")
         .expect("budget boundary should be accepted");
     let error = state
         .consume_generated_items(1, "test")
@@ -3254,10 +3254,7 @@ fn step_repeat_flashes_report_progress_within_few_commands() {
     );
 
     let geometry = stage_reports(&reports, super::ParseStage::Geometry);
-    assert!(
-        geometry.len() >= 5,
-        "a million shapes should report while they become buffers: {geometry:?}"
-    );
+    assert_eq!(geometry.first(), Some(&(0, shapes)));
     assert_eq!(geometry.last(), Some(&(shapes, shapes)));
 }
 
@@ -3285,8 +3282,91 @@ M02*";
         assert_eq!(left.circles.x, right.circles.x);
         assert_eq!(left.is_negative, right.is_negative);
     }
+    // Three polarity layers of one shape each: far less than a step.
     assert_eq!(
-        stage_reports(&reports, super::ParseStage::Geometry).last(),
-        Some(&(3, 3))
+        stage_reports(&reports, super::ParseStage::Geometry),
+        vec![(0, 3), (3, 3)]
+    );
+}
+
+#[test]
+fn render_buffers_report_between_polarity_layers_a_step_of_shapes_apart() {
+    let per_layer = 300_000;
+    assert!(per_layer > super::PROGRESS_SHAPE_STEP && per_layer < 2 * super::PROGRESS_SHAPE_STEP);
+    let mut data = String::from(
+        "%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,0.1*%
+D10*
+",
+    );
+    let flashes = |data: &mut String, count: usize| {
+        for index in 0..count {
+            data.push_str(&format!(
+                "X{}Y{}D03*
+",
+                index % 1000 * 100,
+                index / 1000 * 100
+            ));
+        }
+    };
+    flashes(&mut data, per_layer);
+    data.push_str(
+        "%LPC*%
+",
+    );
+    flashes(&mut data, 1);
+    data.push_str(
+        "%LPD*%
+",
+    );
+    flashes(&mut data, per_layer);
+    data.push_str("M02*");
+
+    let (_, reports) = parse_with_progress(&data);
+    let total = 2 * per_layer + 1;
+    // The one-flash layer in the middle adds too little to report.
+    assert_eq!(
+        stage_reports(&reports, super::ParseStage::Geometry),
+        vec![(0, total), (per_layer, total), (total, total)]
+    );
+}
+
+#[test]
+fn polarity_layers_without_shapes_report_nothing() {
+    // Arc regions stay path regions, so these three polarity layers hold no
+    // shapes to count.
+    let mut data = String::from(
+        "%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,0.1*%
+D10*
+G75*
+",
+    );
+    for (index, polarity) in ["%LPD*%", "%LPC*%", "%LPD*%"].iter().enumerate() {
+        let x = index * 30_000;
+        data.push_str(&format!(
+            "{polarity}
+G36*
+X{}Y0D02*
+G03*
+X{}Y0I-10000J0D01*
+G01*
+X{}Y0D01*
+G37*
+",
+            x + 20_000,
+            x,
+            x + 20_000
+        ));
+    }
+    data.push_str("M02*");
+
+    let (layers, reports) = parse_with_progress(&data);
+    assert!(layers.len() >= 3);
+    assert_eq!(
+        stage_reports(&reports, super::ParseStage::Geometry),
+        vec![(0, 0)]
     );
 }

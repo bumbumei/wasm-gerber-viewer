@@ -12,13 +12,14 @@
 
 ## 현재 배포 내용
 
-업스트림 main(`39cffe3`)에 리뷰 중인 파싱 진행률 PR을 더한 상태입니다.
+업스트림 main(`4fddb0c`)에 리뷰 중인 파싱 진행률 PR을 더한 상태입니다.
 
 - 업스트림 main에는 [memory64 메인 인스턴스 PR](https://github.com/dsafdsaf132/wasm-gerber-viewer/pull/112)이
   머지되어 있고, 그 뒤 maintainer가 step-and-repeat 전개와 picking 할당을 줄인
-  [#114](https://github.com/dsafdsaf132/wasm-gerber-viewer/pull/114)를 더했습니다.
+  [#114](https://github.com/dsafdsaf132/wasm-gerber-viewer/pull/114)와 picking 데이터의 path region
+  참조를 줄인 [#115](https://github.com/dsafdsaf132/wasm-gerber-viewer/pull/115)를 더했습니다.
 - 이 브랜치에만 있는 것은 [큰 레이어의 파싱 진행률 표시](https://github.com/dsafdsaf132/wasm-gerber-viewer/pull/113)입니다.
-  업스트림 리뷰로 PR이 바뀌면 다시 반영합니다.
+  업스트림 main 위로 rebase한 커밋(`2b5b9a1`)이며, 업스트림 리뷰로 PR이 바뀌면 다시 반영합니다.
 
 ## 데모
 
@@ -71,8 +72,8 @@
 ## 업스트림 대비 측정
 
 memory64 PR을 머지하기 전 업스트림 main(`d6891bd`)과 memory64 PR의 세 가지 동작 방식을 같은
-조건에서 비교한 값입니다. 파싱 진행률 PR은 파서 단독 시간을 바꾸지 않았습니다(같은 실행에서 교대로
-잰 값의 차이가 2% 안쪽).
+조건에서 비교한 값입니다. 파싱 진행률 PR이 파서 시간에 주는 차이는 업스트림 main(`4fddb0c`)과
+번갈아 잰 값으로 대체로 2% 안쪽이며, 자세한 표는 PR 본문에 있습니다.
 
 | 구성 | 설명 |
 |-|-|
@@ -123,19 +124,21 @@ memory64 PR을 머지하기 전 업스트림 main(`d6891bd`)과 memory64 PR의 �
 
 ### 4 GiB를 넘는 샘플 (`memory64-test-pads-24M.gbr`)
 
-혼합 구성에서 두 번씩 잰 단계별 시간(초)입니다. 세 경우 모두 메인 인스턴스 memory64로 로드되고
-picking도 정상입니다.
+혼합 구성에서 잰 단계별 시간(초)입니다. 첫 열은 두 번 잰 값이고, 나머지 두 열은 업스트림
+main(`4fddb0c`)과 이 브랜치를 번갈아 10번씩 잰 값의 중앙값입니다. 세 경우 모두 메인 인스턴스
+memory64로 로드되고 picking도 정상입니다.
 
-| 단계 | memory64 PR만 (#114 이전) | 업스트림 main (#114 포함) | 이 브랜치 (업스트림 main + 진행률) |
+| 단계 | memory64 PR만 (#114 이전) | 업스트림 main (#114, #115 포함) | 이 브랜치 (업스트림 main + 진행률) |
 |-|-:|-:|-:|
-| wasm32 워커가 메모리 부족으로 실패하기까지 | 11.9 / 12.3 | 1.2 / 1.1 | 1.1 / 1.1 |
-| memory64 워커 재파싱 | 27.6 / 28.4 | 7.4 / 7.7 | 6.9 / 6.9 |
-| 렌더러 추가 | 1.2 / 1.2 | 1.2 / 1.2 | 1.1 / 1.0 |
-| picking 인덱스 | 3.3 / 3.2 | 3.1 / 2.5 | 3.0 / 2.3 |
-| **합계** | **44.0 / 45.2** | **12.9 / 12.6** | **12.1 / 11.5** |
+| wasm32 워커가 메모리 부족으로 실패하기까지 | 11.9 / 12.3 | 1.07 | 1.11 |
+| memory64 워커 재파싱 | 27.6 / 28.4 | 5.59 | 5.59 |
+| 렌더러 추가 | 1.2 / 1.2 | 1.14 | 1.11 |
+| picking 인덱스 | 3.3 / 3.2 | 2.13 | 2.11 |
+| **합계** | **44.0 / 45.2** | **10.23** | **10.14** |
 
-memory64 빌드 없이 wasm32만 쓰면 업스트림 main에서도 1.5초 만에 실패하고 로드되지 않습니다. 이 브랜치의 진행률 표시는
-로딩 시간을 늘리지 않습니다.
+memory64 빌드 없이 wasm32만 쓰면 업스트림 main에서도 1.5초 만에 실패하고 로드되지 않습니다. 이 샘플에서
+진행률 표시는 로딩 시간을 늘리지 않았습니다. flash 300만 개(57 MiB) 파일에서는 파서 단독으로 약
+2%(57 ms)의 비용이 있습니다.
 
 ### 요약
 
@@ -156,7 +159,7 @@ support (more than 4 GiB of memory) in wasm-gerber-viewer. It is not a stable re
 To use the viewer, go to the upstream project:
 [viewer](https://wasm-gerber-viewer.vercel.app/) ·
 [repository](https://github.com/dsafdsaf132/wasm-gerber-viewer).
-It currently runs upstream `39cffe3`, which already has the memory64 main instance, plus
+It currently runs upstream `4fddb0c`, which already has the memory64 main instance, plus
 the parse-progress pull request still under review upstream.
 The demo list above opens upstream's demos in this fork's deployment.
 The memory64 sample above needs Chrome or Edge 133+, or Firefox 134+.
