@@ -17,9 +17,7 @@ The package provides:
 - A `gerber-renderer` CLI for rendering Gerber files, TAR archives, and ODB++ `.zip`/`.tar`/`.tgz`/`.tar.gz` jobs to PNG
 - Bundled `wasm-bindgen` output generated during packaging
 
-The bundled module is the wasm32 build, so one renderer can use up to 4 GiB of
-WASM memory. The memory64 build that the web viewer loads for its main
-instance is not part of this package.
+The package uses wasm32, with a WASM memory limit of 4 GiB per renderer.
 
 The browser entrypoint uses the caller's WebGL2 canvas. The Node.js entrypoint
 uses the same WASM/WebGL renderer with
