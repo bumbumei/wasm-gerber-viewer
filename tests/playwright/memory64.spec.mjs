@@ -672,6 +672,90 @@ test("the loading modal says when memory64 parses a layer again", async ({ page 
   expect(stages.indexOf("Rendering")).toBeGreaterThan(retry);
 });
 
+// A layer of a million flashes: its worker parse lasts a second or more and
+// reports several times along the way.
+function flashLayerSource(count = 1_000_000) {
+  const lines = ["%FSLAX34Y34*%", "%MOMM*%", "%ADD10C,0.250*%", "D10*"];
+  for (let index = 0; index < count; index += 1) {
+    lines.push(`X${(index % 1000) * 3000}Y${Math.floor(index / 1000) * 3000}D03*`);
+  }
+  lines.push("M02*");
+  return lines.join("\n");
+}
+
+test("re-parsing for a parser option shows how far the parse has got", async ({ page }) => {
+  // Records what the loading modal shows each time it changes; the percentage
+  // is null while the modal shows none.
+  await page.addInitScript(() => {
+    window.__loadingSnapshots = [];
+    new MutationObserver(() => {
+      const modal = document.getElementById("loading-modal");
+      if (!modal || modal.hidden) return;
+      const value = document.getElementById("loading-progress-value");
+      const snapshot = {
+        title: document.getElementById("loading-title").textContent,
+        stage: document.getElementById("loading-stage").textContent,
+        percent: value.hidden ? null : Number.parseInt(value.textContent, 10),
+      };
+      const last = window.__loadingSnapshots.at(-1);
+      if (
+        !last ||
+        last.title !== snapshot.title ||
+        last.stage !== snapshot.stage ||
+        last.percent !== snapshot.percent
+      ) {
+        window.__loadingSnapshots.push(snapshot);
+      }
+    }).observe(document, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["hidden", "value"],
+    });
+  });
+  await page.goto("/");
+  await loadFiles(page, [gerber("flashes.gtl", flashLayerSource())]);
+  await expectBuilds(page, "wasm64", "wasm32");
+
+  await page.evaluate(() => {
+    window.__loadingSnapshots.length = 0;
+  });
+  await page.locator("#region-arc-approximate").evaluate((input) => {
+    input.checked = true;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
+  await expect(page.locator(".gerber-layer-item")).toHaveCount(1);
+
+  const snapshots = (await page.evaluate(() => window.__loadingSnapshots)).filter(
+    ({ title }) => title === "Applying options",
+  );
+  const parsing = snapshots.filter(({ stage }) => stage === "Parsing");
+  const between = parsing.filter(({ percent }) => percent > 5 && percent < 90);
+  expect(
+    between.length,
+    `parse progress between 5% and 90%: ${JSON.stringify(snapshots)}`,
+  ).toBeGreaterThanOrEqual(3);
+  for (const [index, snapshot] of parsing.entries()) {
+    if (index > 0) {
+      expect(snapshot.percent, JSON.stringify(parsing)).toBeGreaterThanOrEqual(
+        parsing[index - 1].percent,
+      );
+    }
+  }
+
+  // The passes that follow the parse count the layers again, without a
+  // percentage.
+  const later = snapshots.filter(({ stage }) => stage !== "Parsing");
+  expect(later.map(({ stage }) => stage)).toEqual(
+    expect.arrayContaining(["Loading", "Building picking index"]),
+  );
+  for (const snapshot of later) {
+    expect(snapshot.percent, JSON.stringify(snapshot)).toBeNull();
+  }
+});
+
 test("the memory64 retry also covers the single-worker path that drill files force", async ({ page }) => {
   await failWasm32Parser(page);
   const { watched } = await loadAndCapture(page, "", [

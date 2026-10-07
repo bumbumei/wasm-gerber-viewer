@@ -3501,16 +3501,17 @@ export class GerberViewer {
     const serialParser = this.createSerialLayerParser({
       useParseWorker: layerSnapshot.some(isGerberLayer),
     });
+    // The parse pass has the bar to itself: the layers are added to the new
+    // renderer in a second pass that counts them again.
+    const parseProgress = this.createLayerLoadProgress(layerSnapshot.length);
     try {
       const parsedLayers = [];
       try {
         for (const [index, layer] of layerSnapshot.entries()) {
-          this.updateLoadingModal({
+          this.updateLayerLoadModal(parseProgress, {
             title: "Applying options",
             stage: "Parsing",
             fileName: layer.name,
-            current: index,
-            total: layerSnapshot.length,
           });
 
           if (isCompositeLayer(layer)) {
@@ -3523,6 +3524,11 @@ export class GerberViewer {
                 layer.sourceContent,
                 layer.offset,
                 { forceInteractions: true },
+                this.createLayerParseProgressHandler(parseProgress, {
+                  index,
+                  name: layer.name,
+                  share: 1,
+                }),
               );
               parsedLayers.push({
                 ...layer,
@@ -3539,6 +3545,7 @@ export class GerberViewer {
               );
             }
           }
+          this.markLayerLoadComplete(parseProgress, index);
         }
       } finally {
         serialParser.dispose();
@@ -4814,14 +4821,17 @@ export class GerberViewer {
 
   /**
    * Progress callback for a worker parse: moves the layer's share of the
-   * modal's bar through LAYER_PARSE_SHARE and says when memory64 parses the
-   * layer again.
+   * modal's bar through `share` of it, which is what the parse is of the
+   * work counted for one layer, and says when memory64 parses the layer again.
    */
-  createLayerParseProgressHandler(progress, { index, name }) {
+  createLayerParseProgressHandler(
+    progress,
+    { index, name, share = LAYER_PARSE_SHARE },
+  ) {
     return (report) => {
       progress.partialLayers.set(
         index,
-        LAYER_PARSE_SHARE * getParseProgressFraction(report),
+        share * getParseProgressFraction(report),
       );
       this.updateLayerLoadModal(progress, {
         stage: getParseStageLabel(report.retry),
